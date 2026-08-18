@@ -1,0 +1,7 @@
+.playwright-cli/
+.workbuddy/
+doubao-tabpanel/
+design/
+session-out.json
+*.crx
+*.pem

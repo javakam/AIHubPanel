@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "AIHubPanel",
+  "version": "8.0.0",
+  "description": "管理 AI API 中转站、密钥与连通性。",
+  "action": {
+    "default_title": "打开 AIHubPanel"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "clipboardWrite"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}
