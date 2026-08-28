@@ -13,12 +13,12 @@
 /* ---------------- 常量与默认数据 ---------------- */
 const LS_STATIONS = "aihub.stations.v2";   // 中转站数组的 localStorage key
 const LS_SETTINGS  = "aihub.settings.v2";  // 设置的 localStorage key
+const LS_UI_STATE   = "aihub.ui.v1";       // 非敏感界面状态（不含 API Key）
 const VERSION = 3;                          // 导出文件版本号
-const DEFAULT_SETTINGS = Object.freeze({ view:"list", theme:"system", proxy:"", concurrency:5, timeout:15 });
+const EXPORT_FORMAT = "aihubpanel.stations"; // 导出格式标识，避免误把其它项目会话文件当站点备份
+const DEFAULT_SETTINGS = Object.freeze({ view:"list", theme:"system", proxy:"", concurrency:5, timeout:15, modelSort:"source" });
 // 本地 server.mjs 可提供受限的同源转发。默认仍由浏览器直连；只有直连受到 CORS
-// 或浏览器网络策略拦截时才探测并使用它。Chrome 扩展页面具备 host_permissions，
-// 不存在同源 Node 服务，因此绝不尝试 /api/proxy。
-const IS_EXTENSION_PAGE = location.protocol === "chrome-extension:";
+// 或浏览器网络策略拦截时才探测并使用它。纯静态部署没有该路径，会自动回退到直连提示。
 const LOCAL_PROXY_PATH = "/api/proxy";
 const LOCAL_PROXY_HEALTH_PATH = "/api/proxy/health";
 const LOCAL_PROXY_RECHECK_MS = 15000;
@@ -30,7 +30,13 @@ let localProxyLastCheckedAt = 0;
 // 它与 online 分开，避免把“网络可达”误报成“API Key 已验证”。
 const CONNECTIVITY_STATES = new Set(["unknown","testing","online","reachable","offline"]);
 const MODEL_STATES = new Set(["idle","testing","ok","fail"]);
+// 模型响应达到此阈值仍视为成功，但在卡片上明确标为“延迟较高”。
+const MODEL_SLOW_LATENCY_MS = 800;
+// 日志只保留有限的摘要，既能排查请求又不会随批量测试无限增长。
+const REQUEST_LOG_MAX = 60;
+const REQUEST_LOG_TEXT_MAX = 500;
 const BALANCE_KINDS = new Set(["balance","quota"]);
+const MODEL_SORT_MODES = new Set(["source","available","latency"]);
 // 留空余额路径时的主流中转站探测顺序。管理接口使用站点根路径，兼容 Base URL 已填 /v1 的情况。
 const DEFAULT_BALANCE_ENDPOINTS = Object.freeze([
   { path:"/v1/usage", source:"Sub2API", parser:"sub2api" },
@@ -45,7 +51,7 @@ const DEFAULT_STATION = {
   name:"新疆-m",
   baseurl:"https://api.hcnsec.cn",
   apikey:"",
-  group:"主力",
+  group:"",
   note:"请通过快速导入或编辑填写 API Key",
   balancePath:""
 };
@@ -62,11 +68,18 @@ let focusReturnStationId = null;                       // 专注页返回后恢�
 let renderRestoreFrame = 0;                            // 合并同一帧内的滚动恢复，避免批测刷新互相抢位置
 let scheduledRenderHandle = null;                      // 合并同一帧内的请求状态更新，避免按钮状态连续重绘导致抖动
 let selectedModels = new Set();                       // 详情中勾选的「待批量测试」模型 id 集合（唯一真源）
+// 按站点保存模型勾选集合；只写入模型/站点 ID，不会把 API Key 放进 UI 状态。
+let selectedModelsByStation = new Map();
+// 非 source 排序只在用户主动切换排序时建立快照；模型测试状态变化不得改变卡片位置。
+const modelDisplaySnapshots = new Map();
+// 原生拖拽期间冻结全量渲染，避免异步请求把正在拖动的 DOM 替换掉。
+let activeDrag = null;
+let renderAfterDrag = false;
 let quickImportActive = false;                         // 当前添加弹窗是否处于「粘贴快速导入」模式
 let quickImportExistingId = null;                      // 快速识别命中的已有站点，用于定位而不重复新增
 const connectivityRequests = new Map();               // 每站仅允许一个连通性探测，避免竞态
 const runningBatches = new Map();                      // 正在批量测试的站点及其配置版本，防止重复发起请求
-const manualModelTests = new Map();                    // 手动单模型测试在首个 await 前占位，避免与批测交错
+const manualModelTests = new Map();                    // 每站手动测试中的模型集合，允许不同模型并行
 const batchRefreshTimers = new Map();                  // 批量测试进度节流，避免 100 模型时高频全页重绘
 const balanceRequests = new Map();                     // 每站一个余额请求，防止重复点击与迟到覆盖
 const modelListRequests = new Map();                   // 每站一个模型列表请求，防止与批测冲突
@@ -88,9 +101,9 @@ const EYE_OFF_ICON = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none
 const EDIT_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" focusable="false"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
 const TRASH_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" focusable="false"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v4M14 11v4"/></svg>';
 const SPINNER_ICON = '<svg class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"/></svg>';
-const ARROW_UP_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m18 15-6-6-6 6"/></svg>';
-const ARROW_DOWN_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m6 9 6 6 6-6"/></svg>';
-const RETRY_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20 11a8 8 0 1 0 2 5.3"/><path d="M20 4v7h-7"/></svg>';
+const LIGHTNING_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M13 2 4.5 13h6.7L10 22l9.5-12h-6.7L13 2Z"/></svg>';
+const RETRY_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 12a9 9 0 0 1 15.3-6.4L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.3 6.4L3 16"/><path d="M3 21v-5h5"/></svg>';
+const LOCATE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="7"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/></svg>';
 
 /* ---------------- 存储层 ---------------- */
 // 生成唯一 id：优先使用浏览器原生 UUID，旧浏览器降级为时间戳 + 随机串
@@ -103,7 +116,7 @@ function text(value, max=2048){ return String(value==null ? "" : value).trim().s
 function normalizeApiKey(value){
   if(typeof value !== "string") return "";
   const key=value.trim();
-  return key.length<=2048 ? key : "";
+  return key.length<=2048 && !/[\u0000-\u001f\u007f]/.test(key) ? key : "";
 }
 function clampInt(value, min, max, fallback){
   const n = Number(value);
@@ -136,21 +149,26 @@ function normalizeSettings(source){
     theme: ["light","dark","system"].includes(raw.theme) ? raw.theme : "system",
     proxy: text(raw.proxy),
     concurrency: clampInt(raw.concurrency, 1, 20, DEFAULT_SETTINGS.concurrency),
-    timeout: clampInt(raw.timeout, 3, 120, DEFAULT_SETTINGS.timeout)
+    timeout: clampInt(raw.timeout, 3, 120, DEFAULT_SETTINGS.timeout),
+    // 排序只改变当前展示，不重写接口返回的原始模型顺序。
+    modelSort: MODEL_SORT_MODES.has(raw.modelSort) ? raw.modelSort : DEFAULT_SETTINGS.modelSort
   };
 }
-function normalizeModel(model){
+function normalizeModel(model, apikey=""){
   const id = text(typeof model === "string" ? model : model && (model.id || model.name), 256);
   if(!id) return null;
   const source = model && typeof model === "object" ? model : {};
   const latency = source.latency === "" || source.latency == null ? NaN : Number(source.latency);
+  const lastRequestAt = source.lastRequestAt === "" || source.lastRequestAt == null ? NaN : Number(source.lastRequestAt);
   return {
     id,
     // testing 只代表当前页面内正在进行的请求。页面刷新/关闭后没有对应的运行时请求，
     // 必须恢复为 idle，避免遗留状态永久锁死模型刷新、测试和编辑删除操作。
     test: source.test === "ok" || source.test === "fail" ? source.test : "idle",
     latency: Number.isFinite(latency) && latency >= 0 ? latency : null,
-    err: text(source.err, 500) || null
+    lastRequestAt: Number.isFinite(lastRequestAt) && lastRequestAt >= 0 ? lastRequestAt : null,
+    // 旧缓存/导入数据可能来自未脱敏版本；加载时重新按当前站点 Key 清洗。
+    err: redactSensitiveText(source.err, apikey, 500) || null
   };
 }
 function normalizeStations(list){
@@ -184,18 +202,56 @@ function load(){
   // 只接受白名单字段及合法范围，避免导入或损坏缓存污染运行时状态。
   try{ settings = normalizeSettings(JSON.parse(localStorage.getItem(LS_SETTINGS) || "null")); }
   catch(e){ settings = { ...DEFAULT_SETTINGS }; }
+  loadUIState();
+}
+
+// 日志是可持久化的诊断摘要，不保存请求体、响应体或任何凭据。
+function normalizeRequestLog(entry, apikey=""){
+  if(!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+  const at=Number(entry.at);
+  const latency=Number(entry.latency);
+  const status=Number(entry.status);
+  const level=["info","ok","warn","error"].includes(entry.level) ? entry.level : "info";
+  const method=text(entry.method,10).toUpperCase();
+  const safeMethod=/^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$/.test(method) ? method : "—";
+  const endpoint=redactSensitiveText(entry.endpoint,apikey,240);
+  const message=redactSensitiveText(entry.message,apikey,REQUEST_LOG_TEXT_MAX);
+  if(!endpoint && !message && !Number.isFinite(at)) return null;
+  return {
+    id:text(entry.id,80) || uid(),
+    at:Number.isFinite(at) && at >= 0 ? at : Date.now(),
+    level,
+    kind:text(entry.kind,40) || "request",
+    method:safeMethod,
+    endpoint:endpoint || "—",
+    model:text(entry.model,256) || null,
+    status:Number.isFinite(status) && status >= 0 ? Math.trunc(status) : null,
+    latency:Number.isFinite(latency) && latency >= 0 ? latency : null,
+    transport:["direct","builtin","custom"].includes(entry.transport) ? entry.transport : null,
+    message:message || "请求完成"
+  };
+}
+function normalizeRequestLogs(list, apikey=""){
+  if(!Array.isArray(list)) return [];
+  const logs=[];
+  list.slice(-REQUEST_LOG_MAX).forEach(entry=>{
+    const normalized=normalizeRequestLog(entry,apikey);
+    if(normalized) logs.push(normalized);
+  });
+  return logs;
 }
 
 // 把任意（含旧版/导入）站点对象规整为当前结构，补全缺失字段，保证后续逻辑安全
 function normalizeStation(source){
   const s = source && typeof source === "object" ? source : {};
+  const apikey = normalizeApiKey(s.apikey);
   const status = s.status && typeof s.status === "object" ? s.status : {};
   const latency = status.latency === "" || status.latency == null ? NaN : Number(status.latency);
   const balance = status.balance === "" || status.balance == null ? NaN : Number(status.balance);
   const models = [];
   const modelIds = new Set();
   (Array.isArray(s.models) ? s.models : []).forEach(raw=>{
-    const model = normalizeModel(raw);
+    const model = normalizeModel(raw, apikey);
     if(model && !modelIds.has(model.id)){ modelIds.add(model.id); models.push(model); }
   });
   const balancePath = normalizeBalancePath(s.balancePath);
@@ -203,8 +259,9 @@ function normalizeStation(source){
     id: normalizeId(s.id),
     name: text(s.name,120) || "未命名",
     baseurl: normalizeBaseUrl(s.baseurl),
-    apikey: normalizeApiKey(s.apikey),
-    group: text(s.group,80),
+    apikey,
+    // 旧版本曾把默认站点标为“主力”；该概念已移除，兼容读取时清除旧标签。
+    group: text(s.group,80) === "主力" ? "" : text(s.group,80),
     note: text(s.note,1000),
     balancePath: balancePath === null ? "" : balancePath,
     order: Number.isFinite(Number(s.order)) ? Number(s.order) : 0,
@@ -218,14 +275,19 @@ function normalizeStation(source){
       balanceUnit: text(status.balanceUnit,32) || null,
       balanceSource: text(status.balanceSource,160) || null,
       balanceNote: text(status.balanceNote,240) || null,
-      balanceRaw: status.balanceRaw == null ? null : status.balanceRaw,
-      balanceError: text(status.balanceError,500) || null,
-      modelListError: text(status.modelListError,500) || null,
-      lastTest: Number.isFinite(Number(status.lastTest)) ? Number(status.lastTest) : null,
-      error: text(status.error,500) || null,
+      // 历史缓存/导入文件中的原始余额响应也可能含调试凭据；加载时统一转为可安全展示的副本。
+      balanceRaw: status.balanceRaw == null ? null : sanitizeBalanceRaw(status.balanceRaw,apikey),
+      balanceError: redactSensitiveText(status.balanceError,apikey,500) || null,
+      modelListError: redactSensitiveText(status.modelListError,apikey,500) || null,
+      // null/空值表示从未测试；Number(null) 会得到 0，不能把它误判为有效时间戳。
+      lastTest: (typeof status.lastTest === "number" || (typeof status.lastTest === "string" && status.lastTest.trim() !== "")) && Number.isFinite(Number(status.lastTest))
+        ? Number(status.lastTest)
+        : null,
+      error: redactSensitiveText(status.error,apikey,500) || null,
       // direct / builtin / custom 只记录最近一次已完成的诊断通道，便于解释 CORS 恢复行为。
       transport: ["direct","builtin","custom"].includes(status.transport) ? status.transport : null,
-      authMode: ["bearer","x-api-key"].includes(status.authMode) ? status.authMode : "bearer"
+      authMode: ["bearer","x-api-key"].includes(status.authMode) ? status.authMode : "bearer",
+      logs: normalizeRequestLogs(status.logs, apikey)
     },
     models
   };
@@ -240,22 +302,91 @@ function seedDefault(persist=true){
   if(persist) save();
 }
 
+// 持久化失败的统一告警：高频写入（测试进度、连通性诊断等）不应连续轰炸，
+// 故按 4 秒去重弹一次红色提示；调用方仍负责关键结构性操作的显式回滚。
+let warnPersistenceAt = 0;
+function warnPersistence(){
+  const now = Date.now();
+  if(now - warnPersistenceAt < 4000) return;
+  warnPersistenceAt = now;
+  toast("浏览器存储写入失败（可能已满或被禁用），改动未持久化，建议导出备份后清理", "err");
+}
+
 // 持久化：仅写 stations / settings 两个 key
 function save(){
   try{ localStorage.setItem(LS_STATIONS, JSON.stringify(stations)); return true; }
-  catch(e){ console.warn("保存中转站数据失败", e); return false; }
+  catch(e){ console.warn("保存中转站数据失败", e); warnPersistence("stations"); return false; }
 }
 function saveSettings(){
   try{ localStorage.setItem(LS_SETTINGS, JSON.stringify(settings)); return true; }
-  catch(e){ console.warn("保存设置失败", e); return false; }
+  catch(e){ console.warn("保存设置失败", e); warnPersistence("settings"); return false; }
+}
+
+// 读取/保存只影响界面位置的状态。任何异常值都会被丢弃，且绝不包含站点凭据。
+function loadUIState(){
+  selectedModelsByStation = new Map();
+  try{
+    const raw = JSON.parse(localStorage.getItem(LS_UI_STATE) || "null");
+    if(!raw || typeof raw !== "object" || Array.isArray(raw)) return;
+    if(typeof raw.selectedStationId === "string" && getById(raw.selectedStationId)) selectedId = raw.selectedStationId;
+    const groups = raw.selectedModelsByStation;
+    if(groups && typeof groups === "object" && !Array.isArray(groups)){
+      Object.keys(groups).slice(0,2000).forEach(id=>{
+        if(!getById(id) || !Array.isArray(groups[id])) return;
+        const valid = new Set(getById(id).models.map(model=>model.id));
+        const picked = groups[id].filter(value=>typeof value === "string" && valid.has(value)).slice(0,2000);
+        if(picked.length) selectedModelsByStation.set(id, picked);
+      });
+    }
+  }catch(_){ /* 损坏的 UI 状态不影响站点配置加载 */ }
+}
+function saveUIState(){
+  try{
+    const activeStationId = focusId || selectedId;
+    const selectedStationId = activeStationId && getById(activeStationId) ? activeStationId : null;
+    const selectedModelsOut = {};
+    selectedModelsByStation.forEach((models,id)=>{
+      if(getById(id) && Array.isArray(models) && models.length) selectedModelsOut[id] = models.slice(0,2000);
+    });
+    localStorage.setItem(LS_UI_STATE, JSON.stringify({ selectedStationId, selectedModelsByStation:selectedModelsOut }));
+    return true;
+  }catch(e){ console.warn("保存界面状态失败", e); warnPersistence("ui"); return false; }
+}
+function rememberCurrentModelSelection(){
+  const activeId = focusId || selectedId;
+  if(!activeId || !getById(activeId)) return;
+  const valid = new Set(getById(activeId).models.map(model=>model.id));
+  const picked = [...selectedModels].filter(modelId=>valid.has(modelId));
+  if(picked.length) selectedModelsByStation.set(activeId,picked);
+  else selectedModelsByStation.delete(activeId);
+  saveUIState();
+}
+function restoreModelSelection(id){
+  const st=getById(id);
+  const valid = new Set(st ? st.models.map(model=>model.id) : []);
+  selectedModels = new Set((selectedModelsByStation.get(id) || []).filter(modelId=>valid.has(modelId)));
+  if(selectedModels.size) selectedModelsByStation.set(id,[...selectedModels]);
+  else selectedModelsByStation.delete(id);
 }
 
 // 按 order 字段排序（就地），保证拖拽/增删后顺序稳定
 function byOrder(){ stations.sort((a,b)=> a.order-b.order); }
 function getById(id){ return stations.find(s=>s.id===id); }
 function hasStationCredentials(st){ return !!(st && st.baseurl && st.apikey); }
+// 判重只使用规范化后的 Base URL 与 API Key 明文值；同一 URL 使用不同 Key 仍然是不同站点。
+function stationCredentialKey(baseurl, apikey){
+  const url=normalizeBaseUrl(baseurl);
+  const key=normalizeApiKey(apikey);
+  return url && key ? url+"\u0000"+key : "";
+}
 function findSameStation(baseurl, apikey, excludeId=null){
-  return stations.find(st=>st.id!==excludeId && st.baseurl===baseurl && st.apikey===apikey) || null;
+  const target=stationCredentialKey(baseurl,apikey);
+  if(!target) return null;
+  return stations.find(st=>st.id!==excludeId && stationCredentialKey(st.baseurl,st.apikey)===target) || null;
+}
+function duplicateStationMessage(st){
+  const name=text(st && st.name,120) || "未命名";
+  return `相同 Base URL 和 API Key 已添加到「${name}」，未重复新增`;
 }
 function stationNameFromBaseUrl(baseurl){
   try{ return new URL(baseurl).hostname || "未命名"; }
@@ -410,6 +541,85 @@ function clearFormApiKeyValue(){ setFormApiKeyValue(""); }
 // 延时分级配色：<200ms 绿、<800ms 黄、更慢红、无值灰
 function latencyCls(ms){ if(!Number.isFinite(ms) || ms<0) return "na"; return ms<200?"good":ms<800?"mid":"bad"; }
 function fmtLat(ms){ return !Number.isFinite(ms) || ms<0 ? "—" : Math.round(ms)+"ms"; }
+function fmtRequestTime(value){
+  if(!Number.isFinite(value) || value<0) return "—";
+  try{
+    return new Intl.DateTimeFormat("zh-CN",{ hour:"2-digit", minute:"2-digit", second:"2-digit", hour12:false }).format(new Date(value));
+  }catch(_){ return "—"; }
+}
+// 日志只保存脱敏的请求摘要，永远不记录请求体、响应体或 API Key。
+function appendRequestLog(st, entry={}){
+  if(!st || !st.status) return null;
+  if(!Array.isArray(st.status.logs)) st.status.logs=[];
+  const normalized=normalizeRequestLog({ ...entry, at:Number.isFinite(Number(entry.at)) ? Number(entry.at) : Date.now() }, st.apikey);
+  if(!normalized) return null;
+  st.status.logs.push(normalized);
+  if(st.status.logs.length > REQUEST_LOG_MAX) st.status.logs.splice(0, st.status.logs.length-REQUEST_LOG_MAX);
+  return normalized;
+}
+function modelVisualState(model){
+  if(!model || model.test === "idle") return "idle";
+  if(model.test === "testing") return "testing";
+  if(model.test === "fail") return "fail";
+  if(model.test === "ok" && Number.isFinite(model.latency) && model.latency >= MODEL_SLOW_LATENCY_MS) return "slow";
+  return "ok";
+}
+function requestLogEntries(st){
+  if(!st || !Array.isArray(st.models)) return { entries:[], count:0 };
+  const saved=Array.isArray(st.status && st.status.logs) ? st.status.logs : [];
+  if(saved.length){
+    const entries=saved.slice(-REQUEST_LOG_MAX).map(log=>({ log })).sort((a,b)=>{
+      const atA=Number.isFinite(a.log.at) ? a.log.at : -1;
+      const atB=Number.isFinite(b.log.at) ? b.log.at : -1;
+      return atB-atA;
+    });
+    return { entries, count:entries.length };
+  }
+  // 兼容没有结构化日志的旧缓存：仅由模型状态生成受限摘要，下一次请求会迁移到 logs。
+  const entries=st.models.map((model,index)=>{
+    const state=modelVisualState(model);
+    const textValue=state==="testing" ? "正在请求 /v1/chat/completions" : state==="ok" || state==="slow" ? "请求成功 · "+fmtLat(model.latency) : state==="fail" ? (model.err || "请求失败") : "";
+    if(!textValue) return null;
+    return { index, log:{ id:"legacy-"+index, at:Number.isFinite(model.lastRequestAt)?model.lastRequestAt:0, level:state==="fail"?"error":state==="testing"?"info":"ok", kind:"模型测试", method:"POST", endpoint:"/v1/chat/completions", model:model.id, status:null, latency:model.latency, transport:null, message:redactSensitiveText(textValue,st.apikey,REQUEST_LOG_TEXT_MAX) } };
+  }).filter(Boolean).sort((a,b)=>(b.log.at-a.log.at)||a.index-b.index).slice(0,REQUEST_LOG_MAX);
+  return { entries, count:entries.length };
+}
+// 「开始」类 info 日志只有在对应请求仍在进行时才算 live；完成后仅作为历史记录，
+// 不能一直顶着 spinner，否则用户会误以为请求卡死或仍在发起。
+function isLogEntryLive(log, st){
+  if(!log || log.level !== "info" || !st) return false;
+  if(log.kind === "模型测试" && log.model){
+    const model=Array.isArray(st.models) ? st.models.find(m=>m.id===log.model) : null;
+    return !!model && model.test === "testing";
+  }
+  if(log.kind === "连通诊断") return st.status && st.status.connectivity === "testing";
+  return false;
+}
+function requestLogPanelMarkup(st){
+  const logData=requestLogEntries(st);
+  const entries=logData.entries;
+  const logRows=entries.length ? entries.map(({log})=>{
+    const live=isLogEntryLive(log, st);
+    // 非 live 的 info 日志回落为中性默认样式（无 testing 琥珀色），只有进行中才着色并转圈。
+    const cls=log.level === "error" ? "fail" : log.level === "warn" ? "warn" : log.level === "ok" ? "ok" : (live ? "testing" : "info");
+    const status=Number.isFinite(log.status) ? "HTTP "+log.status : "—";
+    const latency=Number.isFinite(log.latency) ? fmtLat(log.latency) : "—";
+    const transport=log.transport === "builtin" ? "本地转发" : log.transport === "custom" ? "自定义代理" : log.transport === "direct" ? "浏览器直连" : "—";
+    const subject=log.model ? ` · ${log.model}` : "";
+    return `<div class="request-log-entry ${cls}">
+      <div class="request-log-entry-head"><strong>${esc(log.kind || "请求")}${esc(subject)}</strong><time>${esc(fmtRequestTime(log.at))}</time></div>
+      <div class="request-log-entry-meta"><span>${esc(log.method || "—")} ${esc(log.endpoint || "—")}</span><span>${esc(status)}</span><span>${esc(latency)}</span><span>${esc(transport)}</span></div>
+      <div class="request-log-entry-text">${live?SPINNER_ICON:""}${esc(log.message || "请求完成")}</div>
+    </div>`;
+  }).join("") : `<div class="request-log-empty">暂无请求记录</div>`;
+  return `<section class="request-log-panel" aria-label="日志">
+    <div class="request-log-head">
+      <div class="request-log-heading"><span class="title">日志</span><span class="request-log-count">${logData.count ? logData.count+" 条" : "等待请求"}</span></div>
+      <span class="request-log-summary">仅保留最近 ${REQUEST_LOG_MAX} 条脱敏核心请求信息</span>
+    </div>
+    <div class="request-log-list">${logRows}</div>
+  </section>`;
+}
 // 是否窄屏（≤1024px）；对老浏览器无 matchMedia 时安全降级为「非窄屏」。
 // 此处与 CSS 断点保持一致，避免 100 个模型在中等宽度详情栏被压成单列。
 function isNarrow(){ const mq = window.matchMedia ? window.matchMedia("(max-width:1024px)") : null; return mq ? mq.matches : false; }
@@ -465,6 +675,31 @@ function parseQuickImportJson(raw){
   catch(e){ throw new Error("无法识别完整 JSON"); }
 }
 function quickImportFieldName(key){ return String(key).replace(/[_-]/g,"").toLowerCase(); }
+function createQuickImportFields(){
+  return { baseurl:undefined, apikey:undefined, newApiType:undefined, newApiUrl:undefined, newApiKey:undefined };
+}
+function setQuickImportField(fields, key, value){
+  const name=quickImportFieldName(key);
+  if(name==="baseurl" || name==="apikey"){
+    fields[name]=value;
+    return;
+  }
+  // NewAPI 通道连接导出有明确的类型标识。只有同一对象带此标识时，才将 url/key
+  // 视为连接配置，避免把普通 JSON 中无关的 url 和 key 误识别成站点凭据。
+  if(key==="_type") fields.newApiType=value;
+  else if(name==="url") fields.newApiUrl=value;
+  else if(name==="key") fields.newApiKey=value;
+}
+function quickImportPairsFromFields(fields){
+  const pairs=[];
+  if(fields.baseurl!==undefined || fields.apikey!==undefined){
+    pairs.push({ baseurl:fields.baseurl, apikey:fields.apikey });
+  }
+  if(fields.newApiType==="newapi_channel_conn" && (fields.newApiUrl!==undefined || fields.newApiKey!==undefined)){
+    pairs.push({ baseurl:fields.newApiUrl, apikey:fields.newApiKey });
+  }
+  return pairs;
+}
 function collectQuickImportPairs(root){
   const queue=[{ value:root, depth:0 }];
   const seen=new Set();
@@ -480,13 +715,11 @@ function collectQuickImportPairs(root){
       value.forEach(item=>queue.push({ value:item, depth:current.depth+1 }));
       continue;
     }
-    let baseurl, apikey;
+    const fields=createQuickImportFields();
     Object.entries(value).forEach(([key,item])=>{
-      const name=quickImportFieldName(key);
-      if(name==="baseurl") baseurl=item;
-      if(name==="apikey") apikey=item;
+      setQuickImportField(fields,key,item);
     });
-    if(baseurl !== undefined || apikey !== undefined) pairs.push({ baseurl, apikey });
+    pairs.push(...quickImportPairsFromFields(fields));
     Object.values(value).forEach(item=>{
       if(item && typeof item==="object") queue.push({ value:item, depth:current.depth+1 });
     });
@@ -535,9 +768,9 @@ function readQuickImportString(input, start){
   return { value:null, end:input.length };
 }
 // 容错扫描器：为被截断的对象建立“虚拟根对象”，但每遇到 { / } 都严格切换作用域。
-// 因而只会返回同一直接对象中的 baseURL 与 apiKey；截断掉外层花括号的常见粘贴仍可识别。
+// 因而只会返回同一直接对象中的 legacy 或 NewAPI 连接字段；截断掉外层花括号的常见粘贴仍可识别。
 function collectQuickImportFragmentPairs(input){
-  const root={ baseurl:undefined, apikey:undefined };
+  const root=createQuickImportFields();
   const frames=[root];
   const stack=[root];
   let objectCount=1, cursor=0;
@@ -549,7 +782,7 @@ function collectQuickImportFragmentPairs(input){
       if(++objectCount>QUICK_IMPORT_MAX_OBJECTS || stack.length>=QUICK_IMPORT_MAX_DEPTH+1){
         throw new Error("配置层级或条目过多");
       }
-      const frame={ baseurl:undefined, apikey:undefined };
+      const frame=createQuickImportFields();
       frames.push(frame); stack.push(frame); cursor++;
       continue;
     }
@@ -558,7 +791,7 @@ function collectQuickImportFragmentPairs(input){
       else {
         // 片段可能从某对象内部开始。遇到无法配对的 } 时，不能继续用同一个虚拟根，
         // 否则会把该对象前后的字段误认为同一组配置。
-        const boundary={ baseurl:undefined, apikey:undefined };
+        const boundary=createQuickImportFields();
         frames.push(boundary); stack[0]=boundary;
       }
       cursor++;
@@ -572,15 +805,15 @@ function collectQuickImportFragmentPairs(input){
     const colon=skipQuickImportTrivia(input,cursor);
     if(input[colon]!==":") continue;
     const field=quickImportFieldName(keyToken.value);
-    if(field!=="baseurl" && field!=="apikey") continue;
+    if(field!=="baseurl" && field!=="apikey" && keyToken.value!=="_type" && field!=="url" && field!=="key") continue;
     const valueStart=skipQuickImportTrivia(input,colon+1);
     if(input[valueStart]!=="\"") continue;
     const valueToken=readQuickImportString(input,valueStart);
     if(!valueToken || valueToken.end<=valueStart) break;
     cursor=valueToken.end;
-    if(typeof valueToken.value==="string") stack[stack.length-1][field]=valueToken.value;
+    if(typeof valueToken.value==="string") setQuickImportField(stack[stack.length-1],keyToken.value,valueToken.value);
   }
-  return frames.filter(frame=>frame.baseurl!==undefined || frame.apikey!==undefined);
+  return frames.flatMap(quickImportPairsFromFields);
 }
 function parseQuickImportConfig(raw){
   const input=prepareQuickImportInput(raw);
@@ -593,7 +826,7 @@ function parseQuickImportConfig(raw){
     pairs=collectQuickImportFragmentPairs(input);
   }
   if(!pairs.some(pair=>pair.baseurl !== undefined && pair.apikey !== undefined)){
-    throw new Error("未识别到同一配置对象内的 baseURL 与 apiKey");
+    throw new Error("未识别到同一配置对象内的 baseURL + apiKey，或 NewAPI 通道连接（_type + url + key）");
   }
   const configs=[];
   pairs.forEach(pair=>{
@@ -629,6 +862,7 @@ function stationRevision(id){ return stationRevisions.get(id) || 0; }
 function isCurrentStation(id, revision){ return !!getById(id) && stationRevision(id) === revision; }
 function invalidateStation(id){
   stationRevisions.set(id, stationRevision(id) + 1);
+  modelDisplaySnapshots.delete(id);
   const timer=batchRefreshTimers.get(id);
   if(timer){ clearTimeout(timer); batchRefreshTimers.delete(id); }
   // 请求通道变更后，旧响应会因 revision 失效；同步撤销纯运行时的 testing 标记，
@@ -644,8 +878,12 @@ function invalidateStation(id){
   }
 }
 function scheduleRender(){
+  // 拖拽中不替换列表/网格 DOM；网络请求可继续完成，结果在落下后一次性呈现。
+  if(activeDrag){ renderAfterDrag=true; return; }
   if(scheduledRenderHandle !== null) return;
-  const commit=()=>{ scheduledRenderHandle=null; render(); };
+  // 异步状态只应更新内容，不应由旧模型锚点重新计算内部滚动位置。
+  // 对于模型测试，这能确保点击闪电后当前可见 Grid 保持原地。
+  const commit=()=>{ scheduledRenderHandle=null; render({ preserveModelAnchors:false }); };
   scheduledRenderHandle=typeof requestAnimationFrame === "function" ? requestAnimationFrame(commit) : setTimeout(commit,0);
 }
 function isConnectivityRunning(id){
@@ -653,17 +891,38 @@ function isConnectivityRunning(id){
   return !!entry && entry.revision === stationRevision(id);
 }
 function isBatchRunning(id){ return runningBatches.get(id) === stationRevision(id); }
-function isManualModelTestRunning(id){ return manualModelTests.get(id) === stationRevision(id); }
-// 手动单测必须在第一个 await 前占位。批测 worker 不使用这个锁，以便按并发设置运行。
-function claimManualModelTest(id, revision){
-  if(!isCurrentStation(id, revision) || isManualModelTestRunning(id)) return false;
-  manualModelTests.set(id, revision);
+function manualModelTestEntry(id, revision, create=false){
+  const current=manualModelTests.get(id);
+  if(current && current.revision===revision) return current;
+  if(!create || !isCurrentStation(id, revision)) return null;
+  const entry={ revision, models:new Set() };
+  manualModelTests.set(id, entry);
+  return entry;
+}
+function isManualModelTestRunning(id, modelId=null){
+  const entry=manualModelTests.get(id);
+  if(!entry || entry.revision!==stationRevision(id)) return false;
+  return modelId == null ? entry.models.size>0 : entry.models.has(modelId);
+}
+function manualModelTestCount(id){
+  const entry=manualModelTests.get(id);
+  return entry && entry.revision===stationRevision(id) ? entry.models.size : 0;
+}
+// 手动模型测试在首个 await 前只占用当前模型；不同模型可以并行测试，批量测试仍保持站点级互斥。
+function claimManualModelTest(id, modelId, revision){
+  if(!isCurrentStation(id, revision) || isManualModelTestRunning(id, modelId)) return false;
+  const entry=manualModelTestEntry(id, revision, true);
+  // 运行时也强制并发上限，避免同一帧快速点多个模型绕过 disabled 状态。
+  if(!entry || entry.models.has(modelId) || entry.models.size >= settings.concurrency) return false;
+  entry.models.add(modelId);
   scheduleRender();
   return true;
 }
-function releaseManualModelTest(id, revision){
-  if(manualModelTests.get(id) !== revision) return;
-  manualModelTests.delete(id);
+function releaseManualModelTest(id, modelId, revision){
+  const entry=manualModelTests.get(id);
+  if(!entry || entry.revision!==revision) return;
+  entry.models.delete(modelId);
+  if(!entry.models.size) manualModelTests.delete(id);
   scheduleRender();
 }
 function isRequestRunning(requests, id){
@@ -712,11 +971,72 @@ function flushModelProgress(id, revision){
   if(timer){ clearTimeout(timer); batchRefreshTimers.delete(id); }
   if(isCurrentStation(id, revision)){ save(); scheduleRender(); }
 }
-function networkErrorMessage(error){
+function redactSensitiveText(value, apikey="", max=500){
+  let message=text(value,max);
+  const key=normalizeApiKey(apikey);
+  if(key) message=message.split(key).join("[已隐藏 API Key]");
+  // 上游偶尔会把请求头写进错误正文；界面和本地存储都不应保留这些值。
+  message=message
+    .replace(/((?:authorization|x[_-]?api[_-]?key|api[_-]?key|bearer|(?:access|refresh|id|auth)?[_-]?token|(?:client|api)?[_-]?secret|password|passwd|credential|cookie|set[_-]?cookie|session|private[_-]?key)\s*["']?\s*[:=]\s*["']?)(?:bearer\s+)?[^\s,;"'}`\]]+/gi,"$1[已隐藏]")
+    .replace(/\bbearer\s+[A-Za-z0-9._~+\/-]{8,}/gi,"Bearer [已隐藏]");
+  return message;
+}
+// 原始余额响应仅用于排查字段兼容性，绝不应把上游意外返回的凭据持久化或回显。
+// 这些限制同时避免恶意站点用超深/超大 JSON 拖慢保存、导出或详情渲染。
+const BALANCE_RAW_MAX_DEPTH=8;
+const BALANCE_RAW_MAX_ITEMS=600;
+const BALANCE_RAW_MAX_BRANCH_ITEMS=120;
+const BALANCE_RAW_MAX_STRING=2048;
+const SENSITIVE_BALANCE_FIELD=/(?:^|[-_])(?:x[-_]?api[-_]?key|api[-_]?key|authorization|bearer|(?:access|refresh|id|auth)?[-_]?token|(?:client|api)?[-_]?secret|password|passwd|credential|cookie|set[-_]?cookie|session|private[-_]?key)(?:$|[-_])/i;
+function isSensitiveBalanceField(field){ return SENSITIVE_BALANCE_FIELD.test(text(field,160)); }
+function sanitizeBalanceRaw(raw, apikey=""){
+  const seen=new WeakSet();
+  let itemCount=0;
+  const limit=(reason)=>"[已截断："+reason+"]";
+  const walk=(value, depth, field="")=>{
+    if(isSensitiveBalanceField(field)) return "[已隐藏]";
+    if(itemCount >= BALANCE_RAW_MAX_ITEMS) return limit("响应项过多");
+    itemCount++;
+    if(typeof value === "string") return redactSensitiveText(value,apikey,BALANCE_RAW_MAX_STRING);
+    if(value === null || typeof value === "boolean") return value;
+    if(typeof value === "number") return Number.isFinite(value) ? value : null;
+    if(typeof value !== "object") return "[已省略：不支持的响应值]";
+    if(depth >= BALANCE_RAW_MAX_DEPTH) return limit("嵌套过深");
+    if(seen.has(value)) return limit("循环引用");
+    seen.add(value);
+    if(Array.isArray(value)){
+      const output=[];
+      const length=Math.min(value.length,BALANCE_RAW_MAX_BRANCH_ITEMS);
+      for(let index=0; index<length; index++){
+        if(itemCount >= BALANCE_RAW_MAX_ITEMS){ output.push(limit("响应项过多")); return output; }
+        output.push(walk(value[index],depth+1));
+      }
+      if(value.length > length) output.push(limit("数组项过多"));
+      return output;
+    }
+    // 使用无原型对象，避免导入的 __proto__ 字段影响清洗副本。
+    const output=Object.create(null);
+    let branchItems=0;
+    for(const key in value){
+      if(!Object.prototype.hasOwnProperty.call(value,key)) continue;
+      if(branchItems >= BALANCE_RAW_MAX_BRANCH_ITEMS || itemCount >= BALANCE_RAW_MAX_ITEMS){
+        output["[已截断]"]=limit("对象字段过多");
+        break;
+      }
+      const safeKey=text(key,160) || "[空字段]";
+      try{ output[safeKey]=walk(value[key],depth+1,key); }
+      catch(_){ output[safeKey]="[已省略：字段读取失败]"; }
+      branchItems++;
+    }
+    return output;
+  };
+  return walk(raw,0);
+}
+function networkErrorMessage(error, apikey=""){
   if(error && error.message === "请求超时") return "请求超时";
-  if(error && error.aiHubRelayUnavailable) return text(error.message,500);
+  if(error && error.aiHubRelayUnavailable) return redactSensitiveText(error.message,apikey);
   if(error instanceof TypeError) return "网络不可达或被 CORS 拦截";
-  return text(error && error.message, 500) || "请求失败";
+  return redactSensitiveText(error && error.message,apikey) || "请求失败";
 }
 function isCrossOriginHttpUrl(url){
   try{
@@ -737,7 +1057,6 @@ function localRelayUnavailableError(){
   return error;
 }
 async function checkLocalProxy(){
-  if(IS_EXTENSION_PAGE) return false;
   const now=Date.now();
   if(localProxySupport === true) return true;
   if(localProxySupport === false && now-localProxyLastCheckedAt < LOCAL_PROXY_RECHECK_MS) return false;
@@ -775,7 +1094,7 @@ async function fetchWithTimeout(url, options={}, timeoutSeconds=settings.timeout
       response = await fetch(url, { ...options, signal:controller.signal });
     }catch(directError){
       if(controller.signal.aborted) throw new Error("请求超时");
-      const canUseLocalRelay=!IS_EXTENSION_PAGE && !settings.proxy && isCrossOriginHttpUrl(url) && isCorsLikeError(directError);
+      const canUseLocalRelay=!settings.proxy && isCrossOriginHttpUrl(url) && isCorsLikeError(directError);
       if(!canUseLocalRelay) throw directError;
       if(!(await checkLocalProxy())) throw localRelayUnavailableError();
       try{
@@ -826,14 +1145,16 @@ function localProxyHint(code){
     dns_failed:"本机无法解析该站点域名，请检查 Base URL、DNS 或网络。",
     upstream_unavailable:"本地转发已工作，但无法连接目标服务；请检查目标站是否可用、域名是否正确或本机出网限制。",
     upstream_timeout:"本地转发已连接目标，但上游响应超时；可稍后重试或在设置中提高超时。",
+    upstream_redirect_not_supported:"目标站返回了重定向。为避免 API Key 被转发到其它域名，请把 Base URL 改为最终的 HTTPS API 地址后重试。",
     invalid_redirect:"目标服务给出了无效的重定向地址，请检查 Base URL 是否填写为该站点的 API 根地址。",
     too_many_redirects:"目标服务重定向次数过多，请检查 Base URL 是否存在循环跳转。",
     same_origin_required:"内置转发只能由当前面板页面调用，请通过本面板打开后重试。",
-    body_too_large:"请求体超过内置转发允许的大小。"
+    body_too_large:"请求体超过内置转发允许的大小。",
+    upstream_response_too_large:"上游响应超过 50 MiB 限制，请缩小请求范围或改用支持分页的接口。"
   };
   return hints[code] || "本地同源转发返回了错误。";
 }
-async function responseError(response){
+async function responseError(response, apikey=""){
   let message = "HTTP " + response.status + (response.statusText ? " " + response.statusText : "");
   try{
     const data = await responseData(response);
@@ -844,7 +1165,7 @@ async function responseError(response){
       message += "："+prefix+"。"+localProxyHint(code);
     }else if(detail) message += "：" + text(detail,300);
   }catch(e){}
-  return message;
+  return redactSensitiveText(message,apikey);
 }
 async function discardResponse(response){
   try{ await response.body?.cancel(); }catch(e){}
@@ -864,13 +1185,17 @@ function stationAuthHeaders(st, mode, originalHeaders={}){
 async function fetchStationApi(st, url, options={}, timeoutSeconds=settings.timeout){
   const preferred=st && st.status && st.status.authMode === "x-api-key" ? "x-api-key" : "bearer";
   const alternate=preferred === "bearer" ? "x-api-key" : "bearer";
-  const request=mode=>fetchWithTimeout(url,{ ...options, headers:stationAuthHeaders(st,mode,options.headers || {}) },timeoutSeconds);
+  const { allowAuthRetry: requestedAuthRetry, ...requestOptions } = options || {};
+  const method=String(requestOptions.method || "GET").toUpperCase();
+  // GET/HEAD 可安全地切换认证头；POST 等请求可能产生计费或副作用，禁止自动重发。
+  const allowAuthRetry=requestedAuthRetry === true || (requestedAuthRetry !== false && ["GET","HEAD"].includes(method));
+  const request=mode=>fetchWithTimeout(url,{ ...requestOptions, headers:stationAuthHeaders(st,mode,requestOptions.headers || {}) },timeoutSeconds);
   let response=await request(preferred);
   if(response.ok){
     if(st && st.status) st.status.authMode=preferred;
     return response;
   }
-  if(response.status!==401 && response.status!==403) return response;
+  if(!allowAuthRetry || (response.status!==401 && response.status!==403)) return response;
   await discardResponse(response);
   response=await request(alternate);
   if(response.ok && st && st.status) st.status.authMode=alternate;
@@ -923,7 +1248,7 @@ function connectivityHeaders(st, mode){
 
 // 连通性测试 + RTT：这是单独的诊断请求，而不是模型操作的前置许可。
 // /v1/models 的权限、网关或 CORS 策略可能与实际推理接口不同；因此诊断失败仅记录结果，
-// 不会阻止之后的模型列表获取、单模型测试或批量测试。
+// 不会阻止之后的模型列表获取、模型测试或批量测试。
 function testConnectivity(id){
   const revision = stationRevision(id);
   const station=getById(id); if(!station) return Promise.resolve({ ok:false });
@@ -945,8 +1270,10 @@ function testConnectivity(id){
     let corsBlocked=false;
     let hardFailure=false;
     let primaryUrl="";
+    let diagnosticEndpoint="/v1/models";
     try{
       for(const candidate of connectivityCandidates(st)){
+        diagnosticEndpoint=candidate.path;
         if(!primaryUrl) primaryUrl=settings.proxy ? candidate.url : candidate.rawUrl;
         // 同一站点常见两种认证头：OpenAI 标准 Bearer 和部分网关的 x-api-key。
         // 仅在 Bearer 得到 401/403 时尝试第二种，避免无意义地重复请求。
@@ -959,28 +1286,28 @@ function testConnectivity(id){
               headers:mode ? connectivityHeaders(st,mode) : {}
             });
             if(!isCurrentStation(id, revision)){ finishResponse(response); return { ok:false, stale:true }; }
-            if(response.ok){
-              const latency=performance.now()-started;
-              const transport=responseTransport(response);
-              finishResponse(response);
+              if(response.ok){
+               const latency=performance.now()-started;
+               const transport=responseTransport(response);
+               await discardResponse(response);
               if(mode && st.status) st.status.authMode=mode;
               const state=candidate.requiresAuth ? "online" : "reachable";
               const routeNote=transport === "builtin" ? "已通过本地同源转发完成请求" : transport === "custom" ? "已通过自定义代理完成请求" : null;
               const note=candidate.requiresAuth ? routeNote : ["服务状态接口可达，尚未验证模型 API Key",routeNote].filter(Boolean).join("；");
-              setConn(id, state, latency, note, revision, transport);
+              setConn(id, state, latency, note, revision, transport, diagnosticEndpoint);
               toast(candidate.source+"可用（"+Math.round(latency)+"ms）"+(transport === "builtin" ? "，已自动使用本地同源转发" : ""), candidate.requiresAuth ? "ok" : "warn");
               return { ok:true, latency, state, source:candidate.source, transport };
             }
             const status=response.status;
             const transport=responseTransport(response);
-            const message=await responseError(response);
+            const message=await responseError(response,st.apikey);
             errors.push(candidate.path+"："+message);
             if(transport === "builtin" && (status===502 || status===504)) hardFailure=true;
             if(!(mode === "bearer" && candidate.requiresAuth && (response.status===401 || response.status===403))) break;
           }catch(error){
             if(!isCurrentStation(id, revision)) return { ok:false, stale:true };
             if(error && error.aiHubRelayUnavailable){
-              errors.push(candidate.path+"："+networkErrorMessage(error));
+              errors.push(candidate.path+"："+networkErrorMessage(error,st.apikey));
               hardFailure=true;
               break;
             }
@@ -988,7 +1315,7 @@ function testConnectivity(id){
               corsBlocked=true;
               break;
             }
-            errors.push(candidate.path+"："+networkErrorMessage(error));
+            errors.push(candidate.path+"："+networkErrorMessage(error,st.apikey));
             if(error && error.message === "请求超时") hardFailure=true;
             break;
           }
@@ -1004,20 +1331,20 @@ function testConnectivity(id){
         if(reachability.ok){
           const latency=reachability.latency;
           const note="服务可达，但浏览器阻止读取认证响应（CORS）；已确认网络可达，若模型请求也被拦截，请在设置中配置可信请求代理";
-          setConn(id, "reachable", latency, note, revision);
+          setConn(id, "reachable", latency, note, revision, null, diagnosticEndpoint);
           toast("服务可达，但浏览器跨域限制了认证响应", "warn");
           return { ok:true, reachable:true, cors:true, latency };
         }
-        if(reachability.error) errors.push("跨域探测："+networkErrorMessage(reachability.error));
+        if(reachability.error) errors.push("跨域探测："+networkErrorMessage(reachability.error,st.apikey));
       }
       if(!isCurrentStation(id, revision)) return { ok:false, stale:true };
       const message=errors.length ? errors.slice(-4).join("；") : (corsBlocked ? "浏览器跨域限制，无法读取认证响应" : "未找到可用诊断接口");
-      setConn(id, "offline", null, message, revision);
+      setConn(id, "offline", null, message, revision, null, diagnosticEndpoint);
       return { ok:false, error:message };
     }catch(error){
       if(!isCurrentStation(id, revision)) return { ok:false, stale:true };
-      const message=networkErrorMessage(error);
-      setConn(id, "offline", null, message, revision);
+      const message=networkErrorMessage(error,st.apikey);
+      setConn(id, "offline", null, message, revision, null, diagnosticEndpoint);
       return { ok:false, error:message };
     }
   });
@@ -1031,7 +1358,7 @@ function testConnectivity(id){
 }
 
 // 状态写入 + 持久化 + 重渲染。revision 防止编辑/删除后旧请求覆盖新配置。
-function setConn(id, state, latency, error, revision, transport=null){
+function setConn(id, state, latency, error, revision, transport=null, endpoint="/v1/models"){
   if(revision != null && !isCurrentStation(id, revision)) return false;
   const st = getById(id); if(!st) return false;
   st.status.connectivity = CONNECTIVITY_STATES.has(state) ? state : "unknown";
@@ -1051,6 +1378,15 @@ function setConn(id, state, latency, error, revision, transport=null){
     st.status.error = text(error,500) || "连接失败"; st.status.transport=null;
     st.status.lastTest = Date.now();
   }
+  appendRequestLog(st,{
+    level:state === "offline" ? "error" : state === "testing" ? "info" : "ok",
+    kind:"连通诊断",
+    method:"GET",
+    endpoint:text(endpoint,240) || "/v1/models",
+    latency,
+    transport:st.status.transport || transport,
+    message:state === "testing" ? "开始诊断" : error || (state === "online" ? "诊断通过" : state === "reachable" ? "服务可达" : "连接失败")
+  });
   save(); scheduleRender();
   return true;
 }
@@ -1089,14 +1425,16 @@ async function fetchBalanceRequest(id, revision){
   const st = getById(id); if(!st) return;
   const errors=[];
   let lastReturned=null;
+  let lastCandidatePath="";
   for(const candidate of balanceCandidates(st)){
+    lastCandidatePath=candidate.path;
     let response;
     try{
       response = await fetchStationApi(st, buildUrl(balanceEndpointUrl(st, candidate)));
       if(!isCurrentStation(id, revision)){ finishResponse(response); return; }
       const transport=rememberRequestTransport(st,response);
       if(!response.ok){
-        errors.push(candidate.path + "：" + await responseError(response));
+        errors.push(candidate.path + "：" + await responseError(response,st.apikey));
         continue;
       }
       const data = await responseData(response);
@@ -1106,6 +1444,7 @@ async function fetchBalanceRequest(id, revision){
       if(result){
         setBalanceResult(st, result, data, candidate);
         st.status.balanceError=null;
+        appendRequestLog(st,{ level:"ok", kind:"余额查询", method:"GET", endpoint:candidate.path, latency:null, transport, message:balanceLabel(st)+"："+balanceDisplay(st) });
         save(); scheduleRender();
         toast(balanceLabel(st) + "：" + balanceDisplay(st) + "（" + candidate.source + "）" + (transport === "builtin" ? "，已通过本地同源转发" : ""), "ok");
         return;
@@ -1114,7 +1453,7 @@ async function fetchBalanceRequest(id, revision){
       errors.push(candidate.path + "：未识别可用余额/额度字段");
     }catch(error){
       if(!isCurrentStation(id, revision)) return;
-      const message = networkErrorMessage(error);
+      const message = networkErrorMessage(error,st.apikey);
       errors.push(candidate.path + "：" + message);
       // 网络/CORS 与超时通常不是切换站内路径能解决的，避免连续等待三次超时。
       if(error instanceof TypeError || (error && error.aiHubRelayUnavailable) || message === "请求超时") break;
@@ -1128,13 +1467,16 @@ async function fetchBalanceRequest(id, revision){
     st.status.balanceUnit = null;
     st.status.balanceSource = lastReturned.candidate.source + " · " + lastReturned.candidate.path;
     st.status.balanceNote = null;
-    st.status.balanceRaw = lastReturned.data;
+    st.status.balanceRaw = sanitizeBalanceRaw(lastReturned.data,st.apikey);
     st.status.balanceError=null;
+    appendRequestLog(st,{ level:"warn", kind:"余额查询", method:"GET", endpoint:lastReturned.candidate.path, message:"接口已返回，但未识别可用余额字段" });
     save(); scheduleRender();
     toast("余额接口已返回，但未识别可用余额字段；可查看原始返回或填写自定义路径", "warn");
   }else{
     const message=text(errors.join("；"),500) || "未找到可用余额接口";
     st.status.balanceError=message;
+    // 端点记录最后一次实际请求的候选路径；不再写死某个未必探测过的接口。
+    appendRequestLog(st,{ level:"error", kind:"余额查询", method:"GET", endpoint:lastCandidatePath || "—", message });
     save(); scheduleRender();
     toast("获取余额失败：" + message, "err");
   }
@@ -1277,7 +1619,8 @@ function setBalanceResult(st, result, data, candidate){
   st.status.balanceUnit=balanceUnit(result.unit) || null;
   st.status.balanceSource=candidate.source + " · " + candidate.path;
   st.status.balanceNote=text(result.note,240) || null;
-  st.status.balanceRaw=data;
+  // 余额提取已经使用过原始 data；持久化时仅保留脱敏、受限大小的诊断副本。
+  st.status.balanceRaw=sanitizeBalanceRaw(data,st.apikey);
   st.status.balanceError=null;
 }
 function balanceLabel(st){ return st.status.balanceKind === "quota" ? "可用额度" : "可用余额"; }
@@ -1318,15 +1661,17 @@ async function fetchModelsRequest(id, revision){
   const st = getById(id); if(!st) return;
   if(isBatchRunning(id)){ toast("批量测试进行中，暂不能刷新模型列表", "warn"); return; }
   if(isManualModelTestRunning(id) || st.models.some(model=>model.test==="testing")){
-    toast("单模型测试进行中，暂不能刷新模型列表", "warn"); return;
+    toast("模型测试进行中，暂不能刷新模型列表", "warn"); return;
   }
+  const requestStarted=performance.now();
   try{
     // 不读取也不修改连通性诊断状态：模型列表接口用自己的响应决定成败。
     const response = await fetchStationApi(st, buildUrl(apiUrl(st.baseurl, "/v1/models")));
     if(!isCurrentStation(id, revision)){ finishResponse(response); return; }
     const transport=rememberRequestTransport(st,response);
     if(!response.ok){
-      const message=await responseError(response);
+      const message=await responseError(response,st.apikey);
+      appendRequestLog(st,{ level:"error", kind:"模型列表", method:"GET", endpoint:"/v1/models", status:response.status, latency:performance.now()-requestStarted, transport, message });
       st.status.modelListError=message;
       save(); scheduleRender();
       toast("获取模型失败：" + message, "err");
@@ -1335,32 +1680,50 @@ async function fetchModelsRequest(id, revision){
     const data = await responseData(response);
     if(!isCurrentStation(id, revision)){ finishResponse(response); return; }
     const source = data && typeof data === "object" ? (Array.isArray(data.data) ? data.data : Array.isArray(data.models) ? data.models : null) : null;
-    if(!source) throw new Error("返回中未找到模型列表");
+  if(!source) throw new Error("返回中未找到模型列表");
     const previous = new Map(st.models.map(model=>[model.id, model]));
     const seen = new Set();
     st.models = source.map(item=>text(typeof item === "string" ? item : item && (item.id || item.name),256))
       .filter(modelId=>modelId && !seen.has(modelId) && seen.add(modelId))
       .map(modelId=>{
         const old = previous.get(modelId);
-        return { id:modelId, test:old ? old.test : "idle", latency:old ? old.latency : null, err:old ? old.err : null };
+        return {
+          id:modelId,
+          test:old ? old.test : "idle",
+          latency:old ? old.latency : null,
+          lastRequestAt:old ? old.lastRequestAt : null,
+          err:old ? old.err : null
+        };
       });
     if(isSelectionStation(id)){
       selectedModels = new Set([...selectedModels].filter(modelId=>st.models.some(model=>model.id===modelId)));
+      rememberCurrentModelSelection();
+    }else if(selectedModelsByStation.has(id)){
+      // 非当前站点的模型列表刷新也要清理已不存在的模型 ID。
+      const valid = new Set(st.models.map(model=>model.id));
+      const picked = selectedModelsByStation.get(id).filter(modelId=>valid.has(modelId));
+      if(picked.length) selectedModelsByStation.set(id,picked); else selectedModelsByStation.delete(id);
+      saveUIState();
     }
+    modelDisplaySnapshots.delete(id);
     st.status.modelListError=null;
+    appendRequestLog(st,{ level:"ok", kind:"模型列表", method:"GET", endpoint:"/v1/models", status:response.status, latency:performance.now()-requestStarted, transport, message:"获取到 "+st.models.length+" 个模型" });
     save(); scheduleRender();
     toast("获取到 " + st.models.length + " 个模型" + (transport === "builtin" ? "，已通过本地同源转发" : ""), "ok");
   }catch(error){
     if(isCurrentStation(id, revision)){
       const current=getById(id);
-      const message=networkErrorMessage(error);
-      if(current){ current.status.modelListError=message; save(); scheduleRender(); }
+      const message=networkErrorMessage(error,st.apikey);
+      if(current){
+        appendRequestLog(current,{ level:"error", kind:"模型列表", method:"GET", endpoint:"/v1/models", latency:performance.now()-requestStarted, message });
+        current.status.modelListError=message; save(); scheduleRender();
+      }
       toast("获取模型失败：" + message, "err");
     }
   }
 }
 
-// 单模型测试：手动单测与批测 worker 显式区分，并只与正在执行的连通性诊断保持互斥。
+// 模型测试：手动测试与批量 worker 显式区分；不同模型的手动测试可以并行。
 async function testModel(id, modelId, revision=stationRevision(id), options={}){
   const fromBatch=options && options.fromBatch === true;
   if(!isCurrentStation(id, revision)) return false;
@@ -1378,23 +1741,30 @@ async function testModel(id, modelId, revision=stationRevision(id), options={}){
   if(fromBatch){
     if(!isBatchRunning(id) || isManualModelTestRunning(id)) return false;
   }else{
-    if(isBatchRunning(id) || isRequestRunning(modelListRequests,id) || isManualModelTestRunning(id) || st.models.some(item=>item.test==="testing")){
-      toast("已有模型请求进行中，请完成后再单独测试", "warn");
+    if(isBatchRunning(id) || isRequestRunning(modelListRequests,id) || isManualModelTestRunning(id, modelId)){
+      toast("该模型已有测试请求进行中，其他模型仍可继续测试", "warn");
       return false;
     }
-    if(!claimManualModelTest(id, revision)) return false;
+    if(manualModelTestCount(id) >= settings.concurrency){
+      toast("已达到模型测试并发上限（" + settings.concurrency + "）", "warn");
+      return false;
+    }
+    if(!claimManualModelTest(id, modelId, revision)) return false;
   }
+  let started=performance.now();
   try{
     st = getById(id);
     model = st && st.models.find(item=>item.id===modelId);
     if(!model || model.test === "testing") return false;
     if(fromBatch){
       if(!isBatchRunning(id) || isManualModelTestRunning(id)) return false;
-    }else if(manualModelTests.get(id)!==revision || isBatchRunning(id) || isRequestRunning(modelListRequests,id) || st.models.some(item=>item.id!==modelId && item.test==="testing")){
+    }else if(!isManualModelTestRunning(id, modelId) || isBatchRunning(id) || isRequestRunning(modelListRequests,id)){
       return false;
     }
-    model.test = "testing"; model.latency = null; model.err = null; persistModelProgress(id, revision);
-    const started = performance.now();
+    model.test = "testing"; model.latency = null; model.err = null; model.lastRequestAt=Date.now();
+    appendRequestLog(st,{ level:"info", kind:"模型测试", method:"POST", endpoint:"/v1/chat/completions", model:modelId, message:"请求开始" });
+    persistModelProgress(id, revision);
+    started = performance.now();
     const response = await fetchStationApi(st, buildUrl(apiUrl(st.baseurl, "/v1/chat/completions")), {
       method:"POST",
       headers:{ "Content-Type":"application/json" },
@@ -1403,16 +1773,24 @@ async function testModel(id, modelId, revision=stationRevision(id), options={}){
     if(!isCurrentStation(id, revision)){ finishResponse(response); return false; }
     rememberRequestTransport(st,response);
     if(!response.ok){
-      const message=await responseError(response);
+      const message=await responseError(response,st.apikey);
       if(!isCurrentStation(id, revision)) return false;
-      model.test="fail"; model.latency=null; model.err=message;
+      model.test="fail"; model.latency=null; model.lastRequestAt=Date.now(); model.err=message;
+      appendRequestLog(st,{ level:"error", kind:"模型测试", method:"POST", endpoint:"/v1/chat/completions", model:modelId, status:response.status, latency:performance.now()-started, transport:responseTransport(response), message });
     }
-    else { finishResponse(response); model.test="ok"; model.latency=performance.now()-started; model.err=null; }
+    else {
+      const latency=performance.now()-started;
+      const transport=responseTransport(response);
+      await discardResponse(response); model.test="ok"; model.latency=latency; model.lastRequestAt=Date.now(); model.err=null;
+      appendRequestLog(st,{ level:"ok", kind:"模型测试", method:"POST", endpoint:"/v1/chat/completions", model:modelId, status:response.status, latency, transport, message:latency >= MODEL_SLOW_LATENCY_MS ? "请求成功，但延迟较高" : "请求成功" });
+    }
   }catch(error){
     if(!isCurrentStation(id, revision)) return false;
-    model.test="fail"; model.latency=null; model.err=networkErrorMessage(error);
+    const message=networkErrorMessage(error,st && st.apikey);
+    model.test="fail"; model.latency=null; model.lastRequestAt=Date.now(); model.err=message;
+    appendRequestLog(st,{ level:"error", kind:"模型测试", method:"POST", endpoint:"/v1/chat/completions", model:modelId, latency:performance.now()-started, message });
   }finally{
-    if(!fromBatch) releaseManualModelTest(id, revision);
+    if(!fromBatch) releaseManualModelTest(id, modelId, revision);
   }
   if(!isCurrentStation(id, revision)) return false;
   persistModelProgress(id, revision);
@@ -1434,7 +1812,7 @@ async function batchTest(id){
     return;
   }
   if(isRequestRunning(modelListRequests,id) || isManualModelTestRunning(id) || station.models.some(model=>model.test==="testing")){
-    toast("模型列表或单模型测试进行中，请完成后再批量测试", "warn");
+    toast("模型列表或模型测试进行中，请完成后再批量测试", "warn");
     return;
   }
   // 在第一个 await 前冻结选择范围；切换站点或重新渲染均不会污染本次批测的统计。
@@ -1459,7 +1837,10 @@ async function batchTest(id){
     const passed = current.models.filter(model=>pickedIds.has(model.id) && model.test==="ok").length;
     toast("批量测试完成：选中 " + picks.length + " 个，通过 " + passed + " 个", passed===picks.length ? "ok" : "warn");
   }catch(error){
-    if(isCurrentStation(id, revision)) toast("批量测试失败：" + networkErrorMessage(error), "err");
+    if(isCurrentStation(id, revision)){
+      const current=getById(id);
+      toast("批量测试失败：" + networkErrorMessage(error,current && current.apikey), "err");
+    }
   }finally{
     if(runningBatches.get(id) === revision){
       runningBatches.delete(id);
@@ -1497,6 +1878,79 @@ function filtered(){
   );
 }
 
+// 模型接口返回顺序是用户可预期的基线。非默认排序使用运行时快照：
+// 测试状态从 idle -> testing -> ok/fail 时只更新当前卡片内容，绝不把卡片换到新位置。
+function modelSourceSignature(st){
+  return Array.isArray(st && st.models) ? st.models.map(model=>model.id).join("\u0001") : "";
+}
+function computeModelDisplayOrder(st, mode){
+  const indexed=(st && Array.isArray(st.models) ? st.models : []).map((model,index)=>({ model,index }));
+  const availabilityRank=model=>{
+    if(model.test === "ok") return 0;
+    if(model.test === "testing") return 1;
+    if(model.test === "idle") return 2;
+    return 3;
+  };
+  indexed.sort((a,b)=>{
+    if(mode === "available"){
+      const rank=availabilityRank(a.model)-availabilityRank(b.model);
+      if(rank) return rank;
+      // 已通过模型中，较快的排在前面；其余情况保持接口原顺序。
+      if(a.model.test === "ok" && b.model.test === "ok"){
+        const latency=(Number.isFinite(a.model.latency) ? a.model.latency : Infinity) - (Number.isFinite(b.model.latency) ? b.model.latency : Infinity);
+        if(latency) return latency;
+      }
+      return a.index-b.index;
+    }
+    // 响应速度仅比较已有成功响应的模型；未测试与失败模型仍按接口顺序排在后面。
+    const aMeasured=a.model.test === "ok" && Number.isFinite(a.model.latency);
+    const bMeasured=b.model.test === "ok" && Number.isFinite(b.model.latency);
+    if(aMeasured !== bMeasured) return aMeasured ? -1 : 1;
+    if(aMeasured){
+      const latency=a.model.latency-b.model.latency;
+      if(latency) return latency;
+    }
+    const rank=availabilityRank(a.model)-availabilityRank(b.model);
+    return rank || a.index-b.index;
+  });
+  return indexed;
+}
+
+function modelDisplayOrder(st){
+  const indexed=(st && Array.isArray(st.models) ? st.models : []).map((model,index)=>({ model,index }));
+  const mode=MODEL_SORT_MODES.has(settings.modelSort) ? settings.modelSort : "source";
+  if(mode === "source") return indexed;
+  const signature=modelSourceSignature(st);
+  const previous=modelDisplaySnapshots.get(st.id);
+  if(previous && previous.mode===mode && previous.signature===signature){
+    const byId=new Map(indexed.map(entry=>[entry.model.id,entry]));
+    const ordered=previous.ids.map(id=>byId.get(id)).filter(Boolean);
+    if(ordered.length===indexed.length) return ordered;
+  }
+  const ordered=computeModelDisplayOrder(st,mode);
+  modelDisplaySnapshots.set(st.id,{ mode, signature, ids:ordered.map(entry=>entry.model.id) });
+  return ordered;
+}
+
+function setModelSort(mode){
+  if(!MODEL_SORT_MODES.has(mode) || settings.modelSort === mode) return;
+  settings.modelSort=mode;
+  saveSettings();
+  // 用户主动切换排序才丢弃快照并计算新顺序；保留当前可见模型锚点，
+  // 让长列表重新排列时仍停留在用户正在查看的位置。
+  modelDisplaySnapshots.clear();
+  render();
+}
+
+// 非默认排序故意在测试期间稳定展示。用户主动点击时才按刚得到的结果重新排序。
+function refreshModelSort(stationId){
+  const st=getById(stationId);
+  const mode=MODEL_SORT_MODES.has(settings.modelSort) ? settings.modelSort : "source";
+  if(!st || mode==="source" || !st.models.length) return;
+  modelDisplaySnapshots.delete(st.id);
+  render();
+}
+
 // 连通性状态在详情/Grid 中用于静态展示，在左栏中会复用为可重试按钮。
 function connectivityPresentation(st){
   const map = { unknown:["未诊断","unknown"], online:["连通正常","online"], reachable:["服务可达","online"], offline:["连接失败","offline"], testing:["检测中","testing"] };
@@ -1507,21 +1961,6 @@ function connectivityPresentation(st){
 function statusBadge(st){
   const {txt,cls}=connectivityPresentation(st);
   return `<span class="badge ${cls}"><span class="d ${cls}"></span>${txt}</span>`;
-}
-
-// 排序是卡片级属性，独立放在右上角；筛选时仍禁用，避免隐藏项排序造成无反馈。
-function stationOrderControls(st){
-  const orderLocked=isSearchFiltered();
-  const orderIndex=stations.findIndex(item=>item.id===st.id);
-  const upDisabled=orderLocked || orderIndex<=0;
-  const downDisabled=orderLocked || orderIndex<0 || orderIndex>=stations.length-1;
-  const upTitle=orderLocked ? "请先清空搜索再调整顺序" : upDisabled ? "已是第一个中转站" : "上移";
-  const downTitle=orderLocked ? "请先清空搜索再调整顺序" : downDisabled ? "已是最后一个中转站" : "下移";
-  const escapedId=esc(st.id);
-  return `<span class="station-order" role="group" aria-label="调整 ${esc(st.name)} 的排序">
-    <button type="button" class="btn sm" data-act="up" data-id="${escapedId}" title="${upTitle}" aria-label="${upTitle}" ${upDisabled?"disabled":""}>${ARROW_UP_ICON}</button>
-    <button type="button" class="btn sm" data-act="down" data-id="${escapedId}" title="${downTitle}" aria-label="${downTitle}" ${downDisabled?"disabled":""}>${ARROW_DOWN_ICON}</button>
-  </span>`;
 }
 
 // 编辑和删除在 Grid 操作条与列表底栏复用，保证禁用规则、图标和提示一致。
@@ -1535,50 +1974,65 @@ function stationManageControls(st){
   </span>`;
 }
 
-// 左栏把诊断结果本身做成重试入口：颜色表达当前状态，循环箭头表达可重新诊断。
-function connectivityRetryMarkup(st){
+function connectivityRetryState(st){
   const activity=getStationActivity(st);
   const missingConfig=!hasStationCredentials(st);
   const disabled=missingConfig || activity.connection || activity.balance || activity.modelWork;
   const {txt,cls}=connectivityPresentation(st);
-  const running=activity.connection;
+  // 响应已落盘后，即使请求锁尚未在同一微任务中释放，也应立即展示最终状态。
+  const running=activity.connection && st.status.connectivity==="testing";
   const label=running ? "检测中…" : txt;
   const title=missingConfig ? "请先填写 Base URL 和 API Key" :
     running ? "正在检测连通性" :
     activity.balance || activity.modelWork ? "该站点已有请求进行中，完成后可重新诊断" :
     st.status.connectivity==="unknown" ? "开始连通性诊断（含延时）" : "重新诊断连通性（含延时）";
   const ariaLabel=running ? "正在检测连通性" : label+"，点击"+(st.status.connectivity==="unknown" ? "开始" : "重新")+"诊断连通性（含延时）";
-  return `<button type="button" class="row-metric status ${cls}" data-act="conn" data-id="${esc(st.id)}" title="${title}" aria-label="${ariaLabel}" aria-busy="${running?"true":"false"}" ${disabled?"disabled":""}><span class="m-label">状态</span><span class="m-val status-value"><span class="m-ico">${running?SPINNER_ICON:RETRY_ICON}</span><span class="m-txt">${label}</span></span></button>`;
+  const refreshTitle=missingConfig ? "请先填写 Base URL 和 API Key" : running ? "正在检测连通性" : st.status.connectivity==="unknown" ? "开始连通性诊断（含延时）" : "重新诊断连通性（含延时）";
+  return { activity, disabled, cls, label, running, title, ariaLabel, refreshTitle };
+}
+// 左栏状态值复用普通指标的两行结构，四格的基线与行高完全一致。
+function connectivityRetryMarkup(st){
+  const {cls,label,ariaLabel,running}=connectivityRetryState(st);
+  return `<div class="row-metric status ${cls}" aria-label="${ariaLabel}" aria-busy="${running?"true":"false"}">
+    <span class="m-label">状态</span>
+    <span class="m-val">${running?"检测中…":label}</span>
+  </div>`;
+}
+function connectivityRefreshControl(st){
+  const {disabled,cls,running,refreshTitle,ariaLabel}=connectivityRetryState(st);
+  return `<button type="button" class="status-refresh ${cls}" data-act="conn" data-id="${esc(st.id)}" title="${refreshTitle}" aria-label="${ariaLabel}" aria-busy="${running?"true":"false"}" ${disabled?"disabled":""}>${running?SPINNER_ICON:RETRY_ICON}</button>`;
 }
 
-// Grid 操作条保留独立连通性按钮；列表指标带复用 connectivityRetryMarkup，避免重复入口。
+// 网格操作条保留独立连通性入口；列表则使用同样的图标放在编辑按钮左侧。
 function opsBar(st){
   const activity=getStationActivity(st);
   const missingConfig=!hasStationCredentials(st);
   const connectionDisabled=missingConfig || activity.connection || activity.balance || activity.modelWork;
-  const connectionTitle=missingConfig ? "请先填写 Base URL 和 API Key" : activity.connection ? "正在检测连通性" : activity.balance || activity.modelWork ? "该站点已有请求进行中" : "测试连通性";
+  const connectionRunning=activity.connection && st.status.connectivity==="testing";
+  const connectionTitle=missingConfig ? "请先填写 Base URL 和 API Key" : connectionRunning ? "正在检测连通性" : activity.balance || activity.modelWork ? "该站点已有请求进行中" : "测试连通性";
   const escapedId = esc(st.id);
   return `
     <div class="ops" role="group" aria-label="${esc(st.name)} 的站点操作">
-      <button type="button" class="btn action sm station-connect" data-act="conn" data-id="${escapedId}" title="${connectionTitle}" ${connectionDisabled?"disabled":""}>${activity.connection?SPINNER_ICON+"检测中…":"连通性"}</button>
+      <button type="button" class="btn action sm station-connect" data-act="conn" data-id="${escapedId}" title="${connectionTitle}" ${connectionDisabled?"disabled":""}>${connectionRunning?SPINNER_ICON+"检测中…":"连通性"}</button>
       ${stationManageControls(st)}
     </div>`;
 }
-// 拖拽手柄；点击拦截在 bindListOrGrid 中绑定，避免内联事件属性。
+// 拖拽只从手柄开始，避免点击站点、Key 或其他操作时误触排序。
 function dragHandle(enabled=true){
   if(!enabled) return "";
-  return `<span class="handle" title="拖拽排序"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg></span>`;
+  return `<button type="button" class="handle" data-station-drag-handle title="拖拽调整顺序" aria-label="拖拽调整顺序"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg></button>`;
 }
 
 /* ---------------- 主渲染（核心调度） ---------------- */
 // 全量重绘不可避免（模型测试状态会频繁更新），因此把各滚动容器作为渲染状态的一部分保存与恢复。
-function captureScrollState(){
+function captureScrollState(options={}){
+  const preserveModelAnchors=options.preserveModelAnchors !== false;
   const page=document.scrollingElement;
   const list=document.getElementById("listPane");
   const detail=document.getElementById("detailPane");
   const focus=document.getElementById("focusView");
   let detailAnchor=null;
-  if(detail && detail.offsetParent!==null){
+  if(preserveModelAnchors && detail && detail.offsetParent!==null){
     const panelRect=detail.getBoundingClientRect();
     const visible=[...detail.querySelectorAll("[data-model-id]")].find(card=>{
       const rect=card.getBoundingClientRect();
@@ -1589,7 +2043,7 @@ function captureScrollState(){
   // 专注页由文档本身滚动。记录当前首个可见模型相对视口的位置，
   // 让顶部诊断/错误信息的出现不会把用户正在查看的模型向下推走。
   let focusAnchor=null;
-  if(focus && focus.offsetParent!==null){
+  if(preserveModelAnchors && focus && focus.offsetParent!==null){
     const visible=[...focus.querySelectorAll("[data-model-id]")].find(card=>{
       const rect=card.getBoundingClientRect();
       return rect.bottom>0 && rect.top<window.innerHeight;
@@ -1653,12 +2107,18 @@ function finishRender(scrollState, scrollTarget){
   restoreScrollState(scrollState,scrollTarget);
 }
 function render(options={}){
+  // 拖拽过程中任何全量 render 都会销毁指针目标；把状态刷新合并到落下后。
+  if(activeDrag){
+    renderAfterDrag=true;
+    return;
+  }
   if(scheduledRenderHandle !== null){
     if(typeof cancelAnimationFrame === "function") cancelAnimationFrame(scheduledRenderHandle);
     else clearTimeout(scheduledRenderHandle);
     scheduledRenderHandle=null;
   }
-  const scrollState=options.scrollState || captureScrollState();
+  const preserveModelAnchors=options.preserveModelAnchors !== false;
+  const scrollState=options.scrollState || captureScrollState({ preserveModelAnchors });
   const scrollTarget=options.scrollTarget || "preserve";
   byOrder();
   renderTitleStats();
@@ -1675,7 +2135,7 @@ function render(options={}){
     document.body.classList.add("focus-active");
     split.style.display="none"; grid.style.display="none"; focus.style.display="block";
     document.getElementById("detailPane").innerHTML = "";
-    renderDetailInto(focus, focusedStation, true);
+    renderDetailInto(focus, focusedStation, true, { preserveModelAnchor:preserveModelAnchors });
     finishRender(scrollState,scrollTarget);
     return;
   }
@@ -1705,7 +2165,7 @@ function render(options={}){
     const dp = document.getElementById("detailPane");
     // 窄屏下详情被 CSS 隐藏，无需渲染（省开销）；宽屏才渲染右侧常驻详情
     if(isNarrow()){ /* 隐藏态，跳过 */ }
-    else if(st) renderDetailInto(dp, st, false);
+    else if(st) renderDetailInto(dp, st, false, { preserveModelAnchor:preserveModelAnchors });
     else dp.innerHTML = emptyDetail(filtering);
   }
   finishRender(scrollState,scrollTarget);
@@ -1726,15 +2186,17 @@ function emptyDetail(filteredOut=false){
   return `<div class="empty" style="height:100%"><h3>${title}</h3><p>${sub}</p></div>`;
 }
 
-// 列表左栏：标题操作、连续四格指标、URL 与紧凑 Key；展开后完整 Key 自然换行显示。
+// 列表左栏：标题操作、连续四格指标、URL 与固定高度 Key 轨道；展开只改变轨道内显示，不推动卡片布局。
 function renderListPane(activeId=selectedId){
   const pane = document.getElementById("listPane");
   const data = filtered();
   const orderingEnabled=!isSearchFiltered();
-  const listHeader = `<div class="pane-head"><div><span class="pane-eyebrow">服务目录</span><strong>中转站</strong></div><span class="pane-count">${data.length}<small>个站点</small></span></div>`;
+  const listHeader = `<div class="pane-head"><div><span class="pane-eyebrow">服务目录</span><strong>中转站</strong></div><div class="pane-tools"><button type="button" class="pane-locate" id="btnLocate" title="定位到当前站点" aria-label="定位到当前站点">${LOCATE_ICON}</button><span class="pane-count">${data.length}<small>个站点</small></span></div></div>`;
+  const bindLocate=()=>{ const btn=document.getElementById("btnLocate"); if(btn) btn.onclick=()=>locateActiveStation(); };
   if(!data.length){
     pane.innerHTML = listHeader + emptyInline(stations.length? "没有匹配的中转站" : "还没有中转站", stations.length? "换个关键词试试" : "点击下方「添加中转站」开始");
     const ea = document.getElementById("emptyAdd"); if(ea) ea.onclick = ()=>openForm(null);
+    bindLocate();
     return;
   }
   pane.innerHTML = listHeader + data.map(st=>{
@@ -1746,11 +2208,11 @@ function renderListPane(activeId=selectedId){
     const latClass=latencyCls(st.status.latency);
     const url=esc(st.baseurl);
     return `
-      <div class="row-item ${st.status.connectivity} ${activeId===st.id?'selected':''}" data-id="${esc(st.id)}" draggable="${orderingEnabled?"true":"false"}">
+      <div class="row-item ${st.status.connectivity} ${activeId===st.id?'selected':''}" data-id="${esc(st.id)}">
         <div class="row-top">
           ${dragHandle(orderingEnabled)}
           <div class="row-name"><button type="button" class="station-open" data-open-station="${esc(st.id)}" aria-label="打开 ${esc(st.name)} 的详情">${esc(st.name)}</button>${st.group?`<span class="row-group">· ${esc(st.group)}</span>`:""}</div>
-          <div class="row-actions">${stationOrderControls(st)}${stationManageControls(st)}</div>
+          <div class="row-actions">${connectivityRefreshControl(st)}${stationManageControls(st)}</div>
         </div>
         <div class="row-metrics">
           ${connectivityRetryMarkup(st)}
@@ -1762,12 +2224,14 @@ function renderListPane(activeId=selectedId){
         <div class="row-key" aria-label="API Key">${apiKeyControlsMarkup(st,{list:true})}</div>
       </div>`;
   }).join("");
+  bindLocate();
   bindListOrGrid("#listPane");
 }
 
 // 网格主区：卡片点开整页专注（见 onStationClick）
 function renderGrid(grid){
   const data = filtered();
+  const orderingEnabled=!isSearchFiltered();
   const gridHeader = `<div class="grid-head"><div><span class="grid-eyebrow">API 服务</span><h2>中转站总览</h2></div><div class="grid-summary"><strong>${data.length} 个站点</strong><span class="grid-hint">点击卡片进入工作台</span></div></div>`;
   if(!data.length){
     grid.innerHTML = gridHeader + emptyInline(stations.length? "没有匹配的中转站" : "还没有中转站", stations.length? "换个关键词试试" : "点击下方「添加中转站」开始");
@@ -1775,9 +2239,9 @@ function renderGrid(grid){
     return;
   }
   grid.innerHTML = gridHeader + data.map(st=>`
-    <div class="card ${st.status.connectivity}" data-id="${esc(st.id)}" draggable="false">
+    <div class="card ${st.status.connectivity}" data-id="${esc(st.id)}">
       <span class="accent"></span>
-      <div class="card-head"><span class="card-kicker">${esc(st.group || "未分组")}</span><span class="card-head-side"><span class="lat ${latencyCls(st.status.latency)}">${fmtLat(st.status.latency)}</span>${stationOrderControls(st)}</span></div>
+      <div class="card-head"><span class="card-head-start">${dragHandle(orderingEnabled)}<span class="card-kicker">${esc(st.group || "未分组")}</span></span><span class="card-head-side"><span class="lat ${latencyCls(st.status.latency)}">${fmtLat(st.status.latency)}</span></span></div>
       <div class="meta">
         <div class="name"><button type="button" class="station-open" data-open-station="${esc(st.id)}" aria-label="打开 ${esc(st.name)} 的详情">${esc(st.name)}</button>${st.group?`<span class="grp">· ${esc(st.group)}</span>`:""}</div>
         <div class="url">${esc(st.baseurl)}</div>
@@ -1791,20 +2255,18 @@ function renderGrid(grid){
 
 // 绑定列表/网格内交互：操作按钮 + 整行点击 + 拖拽
 function bindListOrGrid(scope){
-  // 操作按钮：conn/up/down/edit/del
+  // 操作按钮：conn/edit/del
   document.querySelectorAll(scope+' [data-act]').forEach(btn=>{
     btn.onclick = (e)=>{
       e.stopPropagation();
       const id = btn.dataset.id, act = btn.dataset.act;
       if(act==="conn") testConnectivity(id);
-      else if(act==="up") moveOrder(id,-1);
-      else if(act==="down") moveOrder(id,1);
       else if(act==="edit") openForm(id);
       else if(act==="del") openDelete(id);
     };
   });
-  document.querySelectorAll(scope+' .handle').forEach(handle=>{
-    handle.onclick = event=>event.stopPropagation();
+  document.querySelectorAll(scope+' [data-station-drag-handle]').forEach(handle=>{
+    handle.onclick = event=>{ event.preventDefault(); event.stopPropagation(); };
   });
   // 独立的真实按钮保证键盘也能进入详情，避免把含其他操作的整卡伪装成 button。
   document.querySelectorAll(scope+' [data-open-station]').forEach(button=>{
@@ -1813,7 +2275,11 @@ function bindListOrGrid(scope){
   bindUrlInteractions(document.querySelector(scope));
   // 整行/整卡点击：网格或窄屏→整页专注；宽屏列表→右侧详情
   document.querySelectorAll(scope+' .row-item, '+scope+' .card').forEach(el=>{
-    el.onclick = ()=> onStationClick(el.dataset.id);
+    el.onclick = event=>{
+      // Pointer 拖拽松手后浏览器会补发一次 click；消费它，不能误打开详情。
+      if(performance.now()<suppressStationOpenClickUntil){ event.preventDefault(); event.stopPropagation(); return; }
+      onStationClick(el.dataset.id);
+    };
   });
   bindApiKeyControls(document.querySelector(scope));
   attachDrag(scope);
@@ -1871,80 +2337,353 @@ function openUrlMenu(x,y,url){
 }
 function closeUrlMenu(){ if(urlMenuEl) urlMenuEl.style.display="none"; }
 
-/* ---------------- 列表交互：拖拽排序 ---------------- */
-let dragId = null;          // 当前被拖拽项的 id
-let lastDropAfter = true;   // 上次落点在上半区(false)还是下半区(true)，决定插入到目标前/后
-function attachDrag(scope){
-  document.querySelectorAll(scope+' [draggable=true]').forEach(card=>{
-    card.addEventListener("dragstart", e=>{
-      dragId=card.dataset.id; card.classList.add("dragging"); e.dataTransfer.effectAllowed="move";
-      try{ e.dataTransfer.setData("text/plain", dragId); }catch(_){}
-    });
-    card.addEventListener("dragend", ()=>{ card.classList.remove("dragging"); clearDropMarks(); dragId=null; });
-    // 拖拽悬停：根据鼠标在卡片的上/下半区标记插入位置
-    card.addEventListener("dragover", e=>{
-      e.preventDefault();
-      if(!dragId || dragId===card.dataset.id) return;
-      const r = card.getBoundingClientRect();
-      const after = (e.clientY - r.top) > r.height/2;
-      lastDropAfter = after;
-      clearDropMarks();
-      card.classList.add(after?"drop-after":"drop-before");
-    });
-    card.addEventListener("drop", e=>{
-      e.preventDefault();
-      if(!dragId || dragId===card.dataset.id) return;
-      reorder(dragId, card.dataset.id);
-    });
+/* ---------------- 站点拖拽排序 ---------------- */
+let dropCard = null;
+let dropAfter = null;
+let suppressStationOpenClickUntil = 0;
+let dragGlobalEventsBound = false;
+// 拖拽让位动画中其它卡片的 translateY。重算落点布局时用它把 getBoundingClientRect
+// 还原回未位移的原始坐标系，否则让位动画会污染落点判断，越拖越偏。
+const dragShifts = new Map();
+
+// 拖动开始后缓存目标卡片的视口坐标。长列表不能在每一次 pointermove 里反复触发布局测量。
+function captureStationDropLayout(root, fromId){
+  const items=[...root.querySelectorAll(".row-item[data-id], .card[data-id]")]
+    .filter(card=>card.dataset.id!==fromId)
+    .map(card=>{
+      const rect=card.getBoundingClientRect();
+      const shift=dragShifts.get(card)||0;
+      return { card, id:card.dataset.id, top:rect.top-shift, bottom:rect.bottom-shift, left:rect.left, right:rect.right, width:rect.width, height:rect.height };
+    })
+    .filter(item=>item.width>0 && item.height>0);
+  if(root.id!=="gridView") return { kind:"list", items:items.sort((a,b)=>a.top-b.top || a.left-b.left) };
+
+  const rows=[];
+  items.sort((a,b)=>a.top-b.top || a.left-b.left).forEach(item=>{
+    let row=rows.find(candidate=>Math.abs(candidate.top-item.top)<10);
+    if(!row){ row={ top:item.top, bottom:item.bottom, items:[] }; rows.push(row); }
+    row.bottom=Math.max(row.bottom,item.bottom);
+    row.items.push(item);
+  });
+  rows.forEach(row=>row.items.sort((a,b)=>a.left-b.left));
+  return { kind:"grid", items, rows };
+}
+function clearDropMarks(){
+  if(dropCard) dropCard.classList.remove("drop-before","drop-after");
+  dropCard=null;
+  dropAfter=null;
+}
+function applyDropMark(card, after){
+  if(dropCard===card && dropAfter===after) return;
+  clearDropMarks();
+  dropCard=card;
+  dropAfter=after;
+  card.classList.add(after ? "drop-after" : "drop-before");
+}
+function resolveListDrop(layout, clientY){
+  const ordered=layout.items;
+  if(!ordered.length) return null;
+  const first=ordered[0], last=ordered[ordered.length-1];
+  if(clientY<=first.top) return { card:first.card, toId:first.id, after:false };
+  if(clientY>=last.bottom) return { card:last.card, toId:last.id, after:true };
+  const item=ordered.reduce((nearest,candidate)=>{
+    const candidateDistance=clientY<candidate.top ? candidate.top-clientY : clientY>candidate.bottom ? clientY-candidate.bottom : 0;
+    const nearestDistance=clientY<nearest.top ? nearest.top-clientY : clientY>nearest.bottom ? clientY-nearest.bottom : 0;
+    return candidateDistance<nearestDistance ? candidate : nearest;
+  },first);
+  return { card:item.card, toId:item.id, after:clientY>item.top+item.height/2 };
+}
+function resolveGridDrop(layout, clientX, clientY){
+  const rows=layout.rows;
+  if(!rows.length) return null;
+  if(clientY<=rows[0].top) {
+    const item=rows[0].items[0];
+    return { card:item.card, toId:item.id, after:false };
+  }
+  if(clientY>=rows[rows.length-1].bottom){
+    const lastRow=rows[rows.length-1], item=lastRow.items[lastRow.items.length-1];
+    return { card:item.card, toId:item.id, after:true };
+  }
+  let row=rows.find(item=>clientY>=item.top && clientY<=item.bottom);
+  if(!row){
+    const nextRow=rows.find(item=>clientY<item.top);
+    if(nextRow){ const item=nextRow.items[0]; return { card:item.card, toId:item.id, after:false }; }
+    row=rows[rows.length-1];
+  }
+  const nextItem=row.items.find(item=>clientX<item.left+item.width/2);
+  if(nextItem) return { card:nextItem.card, toId:nextItem.id, after:false };
+  const item=row.items[row.items.length-1];
+  return { card:item.card, toId:item.id, after:true };
+}
+function resolveStationDrop(layout, clientX, clientY){
+  if(!layout || !layout.items.length) return null;
+  return layout.kind==="grid" ? resolveGridDrop(layout,clientX,clientY) : resolveListDrop(layout,clientY);
+}
+// 列表视图实时让位：按当前落点把源卡片插入新顺序，其余卡片用 translateY 平滑腾出空位，
+// 拖到哪里空位就开到哪里，排序效果一目了然。网格是多列二维布局，单轴位移无法表达，
+// 退回插入线指示（drop-before/drop-after）。
+function applyListShifts(drag, drop){
+  const items=drag.layout.items;
+  const sourceHeight=Number.isFinite(drag.sourceHeight) ? drag.sourceHeight : 0;
+  if(!items.length || !sourceHeight) return;
+  const gap=items.length>1 ? items[1].top-(items[0].top+items[0].height) : 10;
+  let insertIndex=items.length;
+  if(drop){
+    const idx=items.findIndex(item=>item.id===drop.toId);
+    if(idx>=0) insertIndex=drop.after ? idx+1 : idx;
+  }
+  // 基准取列表首个可见位置（源卡片原本可能在最前，items 已把它排除）。
+  const startY=Math.min(items[0].top, Number.isFinite(drag.sourceTop) ? drag.sourceTop : Infinity);
+  let y=startY;
+  const targets=new Map();
+  items.forEach((item,index)=>{
+    if(index===insertIndex) y+=sourceHeight+gap;
+    targets.set(item.card, Math.round(y-item.top));
+    y+=item.height+gap;
+  });
+  items.forEach(item=>{
+    const shift=targets.get(item.card)||0;
+    if(shift===(dragShifts.get(item.card)||0)) return;
+    if(shift){
+      item.card.classList.add("drag-shift");
+      item.card.style.transform=`translateY(${shift}px)`;
+      dragShifts.set(item.card,shift);
+    }else{
+      item.card.style.transform="";
+      item.card.classList.remove("drag-shift");   // 回到原位即摘除让位类，避免一次长拖拽累积 z-index/GPU 层
+      dragShifts.delete(item.card);
+    }
   });
 }
-function clearDropMarks(){ document.querySelectorAll(".drop-before,.drop-after").forEach(e=>e.classList.remove("drop-before","drop-after")); }
-
-// 拖拽落定：把 from 重排到 to 的前或后，并重写 order 持久化
-function reorder(fromId, toId){
-  if(isSearchFiltered()){ toast("请先清空搜索再调整顺序", "warn"); return; }
-  byOrder();
-  const from = stations.find(s=>s.id===fromId);
-  const to = stations.find(s=>s.id===toId);
-  if(!from || !to) return;
-  stations = stations.filter(s=>s.id!==fromId);
-  const newIdx = stations.findIndex(s=>s.id===toId);
-  const insertAt = lastDropAfter ? newIdx + 1 : newIdx;
-  stations.splice(insertAt, 0, from);
-  stations.forEach((s,i)=> s.order=i);
-  save(); render();
-  toast("已调整顺序", "ok");
+// 未提交（原地放手 / pointercancel）时让所有卡片带过渡平滑复位；
+// .drag-shift 类等 220ms 位移过渡播完后再摘除，避免残留到下一次交互。
+function clearStationShifts(){
+  dragShifts.forEach((_shift,card)=>{
+    card.style.transform="";
+    setTimeout(()=>{ card.classList.remove("drag-shift"); },260);
+  });
+  dragShifts.clear();
 }
-
-// 移动端 ↑/↓ 兜底排序（HTML5 拖拽在触屏不触发）
-function moveOrder(id, dir){
-  if(isSearchFiltered()){ toast("请先清空搜索再调整顺序", "warn"); return; }
+function cancelStationDragFrame(drag){
+  if(!drag || drag.moveFrame===null) return;
+  if(typeof cancelAnimationFrame === "function") cancelAnimationFrame(drag.moveFrame);
+  else clearTimeout(drag.moveFrame);
+  drag.moveFrame=null;
+}
+function updateStationDragDrop(drag, point){
+  if(activeDrag!==drag || !drag.moved || !point) return;
+  if(drag.layoutInvalid || !drag.layout){
+    drag.layout=captureStationDropLayout(drag.root,drag.fromId);
+    drag.layoutInvalid=false;
+  }
+  const drop=resolveStationDrop(drag.layout,point.x,point.y);
+  drag.drop=drop ? { toId:drop.toId, after:drop.after } : null;
+  if(drop) applyDropMark(drop.card,drop.after); else clearDropMarks();
+  if(drag.layout.kind==="list") applyListShifts(drag, drop);
+}
+function queueStationDragDrop(drag){
+  if(!drag || drag.moveFrame!==null) return;
+  const commit=()=>{
+    drag.moveFrame=null;
+    updateStationDragDrop(drag,drag.pendingPoint);
+  };
+  drag.moveFrame=typeof requestAnimationFrame === "function" ? requestAnimationFrame(commit) : setTimeout(commit,0);
+}
+function flushStationDragDrop(drag){
+  cancelStationDragFrame(drag);
+  updateStationDragDrop(drag,drag.pendingPoint);
+}
+function invalidateStationDragLayout(){
+  const drag=activeDrag;
+  if(!drag || !drag.moved) return;
+  drag.layoutInvalid=true;
+  queueStationDragDrop(drag);
+}
+function cancelQueuedRenderForDrag(){
+  let cancelled=false;
+  if(scheduledRenderHandle!==null){
+    if(typeof cancelAnimationFrame === "function") cancelAnimationFrame(scheduledRenderHandle);
+    else clearTimeout(scheduledRenderHandle);
+    scheduledRenderHandle=null;
+    cancelled=true;
+  }
+  if(renderRestoreFrame){
+    if(typeof cancelAnimationFrame === "function") cancelAnimationFrame(renderRestoreFrame);
+    else clearTimeout(renderRestoreFrame);
+    renderRestoreFrame=0;
+    cancelled=true;
+  }
+  if(cancelled) renderAfterDrag=true;
+}
+function beginStationDrag(event){
+  const root=event.currentTarget;
+  const handle=event.target.closest("[data-station-drag-handle]");
+  if(!handle || !root.contains(handle) || isSearchFiltered() || event.isPrimary===false || (event.pointerType==="mouse" && event.button!==0)) return;
+  if(activeDrag) cancelStationDrag();
+  const source=handle.closest(".row-item[data-id], .card[data-id]");
+  if(!source || !root.contains(source)) return;
+  cancelQueuedRenderForDrag();
+  activeDrag={ root, handle, pointerId:event.pointerId, fromId:source.dataset.id, source, startX:event.clientX, startY:event.clientY, moved:false, drop:null, layout:null, layoutInvalid:true, pendingPoint:null, moveFrame:null };
+  try{ handle.setPointerCapture(event.pointerId); }catch(_){}
+  handle.addEventListener("lostpointercapture", cancelStationDrag, { once:true });
+  event.preventDefault();
+  event.stopPropagation();
+}
+function moveStationDrag(event){
+  const drag=activeDrag;
+  if(!drag || event.pointerId!==drag.pointerId) return;
+  if(isSearchFiltered()){
+    cancelStationDrag(event);
+    return;
+  }
+  const distance=Math.hypot(event.clientX-drag.startX,event.clientY-drag.startY);
+  if(!drag.moved && distance<5) return;
+  if(!drag.moved){
+    drag.moved=true;
+    const rect=drag.source.getBoundingClientRect();
+    drag.sourceTop=rect.top;
+    drag.sourceHeight=rect.height;
+    drag.source.classList.add("dragging");
+    drag.root.classList.add("drag-active");
+  }
+  // 源卡片完全跟手浮起：transform 直接等于指针增量、不加过渡，所见即所得；
+  // 落点与让位计算已由 queueStationDragDrop 合并到一帧内完成。
+  drag.source.style.transform=`translate(${event.clientX-drag.startX}px,${event.clientY-drag.startY}px)`;
+  event.preventDefault();
+  drag.pendingPoint={ x:event.clientX, y:event.clientY };
+  // 浏览器最多一帧计算一次落点；长列表拖动时不会因指针采样率而反复强制布局。
+  queueStationDragDrop(drag);
+}
+function finishStationDrag(event, commit){
+  const drag=activeDrag;
+  if(!drag || (event && "pointerId" in event && event.pointerId!==drag.pointerId)) return;
+  if(commit && drag.moved && event) drag.pendingPoint={ x:event.clientX, y:event.clientY };
+  if(commit && drag.moved) flushStationDragDrop(drag); else cancelStationDragFrame(drag);
+  const latestDrop=commit && drag.moved ? drag.drop : null;
+  const deferred=renderAfterDrag;
+  clearDropMarks();
+  drag.source.classList.remove("dragging");
+  drag.source.style.transform="";
+  drag.root.classList.remove("drag-active");
+  activeDrag=null;
+  if(drag.moved) suppressStationOpenClickUntil=performance.now()+420;
+  try{ if(drag.handle.hasPointerCapture(drag.pointerId)) drag.handle.releasePointerCapture(drag.pointerId); }catch(_){}
+  renderAfterDrag=false;
+  if(latestDrop && reorder(drag.fromId,latestDrop.toId,latestDrop.after)){
+    renderWithStationFlip(()=>render({ preserveModelAnchors:false }));
+    dragShifts.clear(); // 旧卡片已随重绘移除，只清引用，不再触碰样式
+    toast("已调整顺序", "ok");
+  }else{
+    // 未提交或顺序未变：让位/跟随的卡片带过渡平滑归位。
+    clearStationShifts();
+    if(deferred) scheduleRender();
+  }
+}
+// 排序提交后的 FLIP 过渡：重绘前记录各站点的视觉位置，重绘后把位移的卡片从旧位置
+// 平滑滑到新位置。让位动画已把多数卡片提前送到目标位，这里只补齐最后一小段，
+// 避免整列在松手瞬间跳变。
+function renderWithStationFlip(renderFn){
+  const before=new Map();
+  document.querySelectorAll(".row-item[data-id], .card[data-id]").forEach(el=>{
+    const rect=el.getBoundingClientRect();
+    if(rect.width||rect.height) before.set(el.dataset.id, rect.top);
+  });
+  renderFn();
+  const moved=[];
+  document.querySelectorAll(".row-item[data-id], .card[data-id]").forEach(el=>{
+    const prevTop=before.get(el.dataset.id);
+    if(prevTop==null) return;
+    const delta=prevTop-el.getBoundingClientRect().top;
+    if(Math.abs(delta)<2) return;
+    el.style.transition="none";
+    el.style.transform=`translateY(${delta}px)`;
+    moved.push(el);
+  });
+  if(!moved.length) return;
+  void moved[0].offsetWidth; // 先提交初始位移，再开过渡归零
+  moved.forEach(el=>{
+    el.style.transition="transform .24s cubic-bezier(.2,.9,.25,1)";
+    el.style.transform="";
+    el.addEventListener("transitionend",()=>{ el.style.transition=""; },{once:true});
+  });
+}
+function endStationDrag(event){ finishStationDrag(event,true); }
+function cancelStationDrag(event){ finishStationDrag(event,false); }
+function attachDrag(scope){
+  const root=document.querySelector(scope);
+  if(!root || root.dataset.dragBound==="true") return;
+  root.dataset.dragBound="true";
+  root.addEventListener("pointerdown",beginStationDrag);
+  root.addEventListener("pointermove",moveStationDrag);
+  root.addEventListener("pointerup",endStationDrag);
+  root.addEventListener("pointercancel",cancelStationDrag);
+  if(!dragGlobalEventsBound){
+    dragGlobalEventsBound=true;
+    window.addEventListener("blur",()=>cancelStationDrag());
+    window.addEventListener("resize",invalidateStationDragLayout);
+    // 页面或可滚动容器滚动后，下一帧才重新取一次坐标，避免缓存坐标陈旧。
+    document.addEventListener("scroll",invalidateStationDragLayout,true);
+    document.addEventListener("visibilitychange",()=>{ if(document.hidden) cancelStationDrag(); });
+  }
+}
+// 显式携带落点方向，删除原项后再定位目标项，杜绝复用上一轮拖拽方向。
+function reorder(fromId, toId, after){
+  if(isSearchFiltered()){ toast("请先清空搜索再调整顺序", "warn"); return false; }
+  if(!fromId || !toId || fromId===toId) return false;
   byOrder();
-  const idx = stations.findIndex(s=>s.id===id);
-  const swap = idx + dir;
-  if(idx<0 || swap<0 || swap>=stations.length) return;
-  const a = stations[idx], b = stations[swap];
-  stations[idx]=b; stations[swap]=a;
-  stations.forEach((s,i)=> s.order=i);
-  save(); render();
+  const previous=stations.slice();
+  const from=previous.find(st=>st.id===fromId);
+  const target=previous.find(st=>st.id===toId);
+  if(!from || !target) return false;
+  const next=previous.filter(st=>st.id!==fromId);
+  const targetIndex=next.findIndex(st=>st.id===toId);
+  if(targetIndex<0) return false;
+  next.splice(after ? targetIndex+1 : targetIndex,0,from);
+  if(next.every((station,index)=>station===previous[index])) return false;
+  stations=next;
+  stations.forEach((station,index)=>{ station.order=index; });
+  save();
+  return true;
 }
 
 /* ---------------- 选中 / 专注 ---------------- */
+// 列表可能很长；一键把当前正在查看的站点滚动到视野中央，并用主色描边闪烁两下。
+function locateActiveStation(){
+  const id=focusId || selectedId;
+  if(!id || !getById(id)){ toast("还没有选中的站点，先在左侧点开一个", "warn"); return; }
+  const row=document.querySelector(`#listPane .row-item[data-id="${cssEscape(id)}"]`);
+  if(!row){ toast("当前站点不在搜索结果中，请先清空搜索", "warn"); return; }
+  row.scrollIntoView({ block:"center", behavior:"smooth" });
+  row.classList.remove("locate-flash");
+  void row.offsetWidth; // 重新触发动画
+  row.classList.add("locate-flash");
+  row.addEventListener("animationend",()=>row.classList.remove("locate-flash"),{once:true});
+}
+function cssEscape(value){
+  return window.CSS && typeof CSS.escape==="function" ? CSS.escape(value) : String(value).replace(/[^a-zA-Z0-9_-]/g,"\\$&");
+}
 // 点击行/卡：网格或窄屏→整页专注；宽屏列表→选中并刷新右栏
 function onStationClick(id){
   if(settings.view==="grid" || isNarrow()){ openFocus(id); }
   else { selectStation(id); }
 }
 function selectStation(id){
-  selectedId = id; selectedModels = new Set();   // 切换站点清空模型勾选（避免跨站残留）
+  rememberCurrentModelSelection();
+  selectedId = id;
+  restoreModelSelection(id);
+  saveUIState();
   document.querySelectorAll("#listPane .row-item").forEach(r=> r.classList.toggle("selected", r.dataset.id===id));
   const st = getById(id); const dp = document.getElementById("detailPane");
   if(st) renderDetailInto(dp, st, false); else dp.innerHTML = emptyDetail();
 }
 function openFocus(id){
+  rememberCurrentModelSelection();
   focusReturnScroll=captureScrollState();
   focusReturnStationId=id;
-  focusId = id; selectedModels = new Set();
+  focusId = id;
+  selectedId = id;
+  restoreModelSelection(id);
+  saveUIState();
   render({ scrollTarget:"focus-top" });
 }
 function restoreStationOpenFocus(id){
@@ -1978,22 +2717,23 @@ function detailHTML(st, isFocus){
   const balanceBusy=activity.balance;
   const modelListBusy=activity.modelList;
   const batchBusy=activity.batch;
-  const connectionDisabled=missingConfig || connectionBusy || balanceBusy || activity.modelWork;
   // 余额接口可独立于 /v1/models 工作；即使模型连通性未通过，也允许直接查询管理余额接口。
   const balanceDisabled=missingConfig || connectionBusy || balanceBusy;
   // 连通性结果只是诊断记录；模型操作只与「诊断正在执行」及自身请求互斥。
   const modelControlsDisabled=missingConfig || connectionBusy || activity.modelWork;
   const stationBusy=activity.any;
   const selectedCount = st.models.reduce((count,model)=>count+(selectedModels.has(model.id)?1:0),0);
+  // 未选择模型时不提供无效的批量入口；原生 disabled 保持按钮尺寸，选择后再启用，不会触发布局变化。
+  const batchDisabled = modelControlsDisabled || selectedCount === 0;
   const balanceTxt = hasBalance(st) ? balanceDisplay(st) : "已获取（查看原始返回）";
   const balanceMeta=[st.status.balanceSource,st.status.balanceNote].filter(Boolean).join(" · ");
   const balanceActionLabel=balanceBusy ? SPINNER_ICON+"余额获取中…" : "查询余额";
-  const modelFetchLabel=modelListBusy ? SPINNER_ICON+"模型获取中…" : st.models.length ? "刷新模型列表" : "获取模型列表";
+  const modelFetchLabel=modelListBusy ? SPINNER_ICON+"获取中…" : "获取模型列表";
   const feedback=[];
   if(missingConfig){
     feedback.push(`<span class="detail-feedback-item error">请先通过编辑或快速导入填写 Base URL 和 API Key。</span>`);
   }else if(st.status.connectivity==="offline"){
-    feedback.push(`<span class="detail-feedback-item error" title="${esc(st.status.error || "该诊断请求未通过。")}">诊断原因：${esc(st.status.error || "该诊断请求未通过。")}；模型列表、单测和批测仍可单独发起。</span>`);
+    feedback.push(`<span class="detail-feedback-item error" title="${esc(st.status.error || "该诊断请求未通过。")}">诊断原因：${esc(st.status.error || "该诊断请求未通过。")}；模型列表、模型测试和批量测试仍可单独发起。</span>`);
   }else if(st.status.connectivity==="reachable"){
     feedback.push(`<span class="detail-feedback-item error" title="${esc(st.status.error || "服务可达，但认证响应受浏览器跨域限制。")}">${esc(st.status.error || "服务可达，但认证响应受浏览器跨域限制。")}</span><button type="button" class="inline-action" id="dwProxySetup">配置可信代理</button>`);
   }
@@ -2008,20 +2748,20 @@ function detailHTML(st, isFocus){
     feedback.push(`<details class="raw"><summary>查看原始返回</summary><pre>${esc(JSON.stringify(st.status.balanceRaw,null,2))}</pre></details>`);
   }
   const feedbackHtml=feedback.length ? `<div class="detail-feedback">${feedback.join("")}</div>` : "";
-  const modelsHtml = st.models.length ? st.models.map((m,index)=>{
-    const testDisabled = modelControlsDisabled;
-    const testLabel=m.test==="testing" ? "测试中…" : "单测";
+  const displayModels = modelDisplayOrder(st);
+  const modelsHtml = displayModels.length ? displayModels.map(({model:m,index})=>{
+    const manualAtCapacity = manualModelTestCount(st.id) >= settings.concurrency && m.test!=="testing";
+    const modelTestDisabled = missingConfig || connectionBusy || modelListBusy || batchBusy || m.test==="testing" || manualAtCapacity;
     const selected=selectedModels.has(m.id);
+    const visualState=modelVisualState(m);
     const modelInputId=`dwModel-${st.id}-${index}`;
+    const testTitle=missingConfig ? "请先填写 Base URL 和 API Key" : m.test==="testing" ? "该模型正在测试" : manualAtCapacity ? "已达到模型测试并发上限" : batchBusy ? "批量测试进行中" : modelListBusy ? "正在获取模型列表" : connectionBusy ? "连通性诊断进行中" : "测试此模型的连通性";
     return `
-      <div class="model ${selected?"selected":""}" data-model-id="${esc(m.id)}">
+      <div class="model model-state-${visualState} ${selected?"selected":""}" data-model-id="${esc(m.id)}">
         <input id="${esc(modelInputId)}" type="checkbox" data-m="${esc(m.id)}" ${selected?"checked":""} ${modelControlsDisabled?"disabled":""}>
         <div class="m-main">
-          <div class="model-name-row"><label class="model-select" for="${esc(modelInputId)}" title="切换选择 ${esc(m.id)}"><span class="mname">${esc(m.id)}</span></label><button type="button" class="btn model-copy" data-copy="${esc(m.id)}" title="复制模型 ID" aria-label="复制模型 ID ${esc(m.id)}">${COPY_ICON}</button></div>
-          <div class="m-meta"><span class="mst ${m.test}"${m.err?` title="${esc(m.err)}"`:""}>${m.test==="ok"?"通过":m.test==="fail"?"失败":m.test==="testing"?"测试中":"未测"}</span><span class="mlat ${latencyCls(m.latency)}">${fmtLat(m.latency)}</span></div>
-        </div>
-        <div class="model-actions">
-          <button type="button" class="btn action sm model-test" data-model-test="${esc(m.id)}" ${testDisabled?"disabled":""} title="单独测试此模型">${m.test==="testing"?SPINNER_ICON+testLabel:testLabel}</button>
+          <div class="model-name-row"><label class="model-select" for="${esc(modelInputId)}" title="切换选择 ${esc(m.id)}"><span class="mname">${esc(m.id)}</span></label><button type="button" class="btn model-run" data-model-test="${esc(m.id)}" ${modelTestDisabled?"disabled":""} title="${esc(testTitle)}" aria-label="${esc(testTitle)}" aria-busy="${m.test==="testing"?"true":"false"}">${m.test==="testing"?SPINNER_ICON:LIGHTNING_ICON}</button><button type="button" class="btn model-copy" data-copy="${esc(m.id)}" title="复制模型 ID" aria-label="复制模型 ID ${esc(m.id)}">${COPY_ICON}</button></div>
+          <div class="m-meta"><span class="mst ${visualState}"${m.err?` title="${esc(m.err)}"`:""}>${visualState==="ok"?"测试成功":visualState==="slow"?"延迟较高":visualState==="fail"?"测试失败":visualState==="testing"?"测试中":"未测试"}</span><span class="mlat ${latencyCls(m.latency)}">${fmtLat(m.latency)}</span></div>
         </div>
       </div>`;
   }).join("")
@@ -2030,9 +2770,8 @@ function detailHTML(st, isFocus){
   return `
     <div class="detail-head">
       ${isFocus?`<button type="button" class="btn sm" id="dwBack">← 返回</button>`:""}
-      <div class="detail-title"><span class="badge ${cls}"><span class="d ${cls}"></span>${txt}</span><span class="d-name">${esc(st.name)}</span><span class="lat ${latencyCls(st.status.latency)}">${fmtLat(st.status.latency)}</span></div>
-      <div class="detail-head-actions" role="group" aria-label="${esc(st.name)} 的诊断与余额操作">
-        <button type="button" class="btn action sm" id="dwConn" ${connectionDisabled?"disabled":""} aria-busy="${connectionBusy?"true":"false"}" title="${missingConfig?"请先填写 Base URL 和 API Key":"测试连通性（含延时）"}">${connectionBusy?SPINNER_ICON+"检测中…":"测试连通性"}</button>
+      <div class="detail-title"><span class="badge ${cls}"><span class="d ${cls}"></span>${txt}</span><span class="d-name">${esc(st.name)}</span></div>
+      <div class="detail-head-actions" role="group" aria-label="${esc(st.name)} 的余额操作">
         <button type="button" class="btn action sm" id="dwBal" ${balanceDisabled?"disabled":""} aria-busy="${balanceBusy?"true":"false"}" title="${missingConfig?"请先填写 Base URL 和 API Key":"查询可用余额或额度"}">${balanceActionLabel}</button>
       </div>
     </div>
@@ -2040,19 +2779,29 @@ function detailHTML(st, isFocus){
 
     <div class="sec">
       <div class="model-toolbar">
-        <div class="model-titleline"><span class="title">模型（${st.models.length}）</span><button type="button" class="btn action sm" id="dwFetch" ${modelControlsDisabled?"disabled":""} aria-busy="${modelListBusy?"true":"false"}" title="获取或刷新模型列表">${modelFetchLabel}</button><span class="selection-count" title="批量测试并发 ${esc(settings.concurrency)}">已选 ${selectedCount} · 并发 ${esc(settings.concurrency)}</span></div>
-        <div class="model-toolbar-actions">
-          <button type="button" class="btn sm" id="dwSelAll" ${modelControlsDisabled?"disabled":""}>全选</button>
-          <button type="button" class="btn sm" id="dwSelNone" ${modelControlsDisabled?"disabled":""}>清空</button>
-          <button type="button" class="btn primary sm" id="dwBatch" ${modelControlsDisabled?"disabled":""} aria-busy="${batchBusy?"true":"false"}">${batchBusy?SPINNER_ICON+"批量测试中…":"测试选中"}</button>
+        <div class="model-toolbar-heading"><span class="title">模型（${st.models.length}）</span><span class="selection-count" title="批量测试并发 ${esc(settings.concurrency)}">已选 ${selectedCount} · 并发 ${esc(settings.concurrency)}</span></div>
+        <div class="model-toolbar-groups">
+          <div class="model-tools-group data-tools ${settings.modelSort!=="source"?"has-refresh":""}" role="group" aria-label="模型数据操作">
+            <button type="button" class="btn action sm" id="dwFetch" ${modelControlsDisabled?"disabled":""} aria-busy="${modelListBusy?"true":"false"}" title="从当前站点获取模型列表">${modelFetchLabel}</button>
+            <label class="model-sort" for="dwModelSort"><span>排序</span><select id="dwModelSort" aria-label="模型排序方式" ${!st.models.length?"disabled":""}>
+              <option value="source" ${settings.modelSort==="source"?"selected":""}>获取顺序</option>
+              <option value="available" ${settings.modelSort==="available"?"selected":""}>可用性</option>
+              <option value="latency" ${settings.modelSort==="latency"?"selected":""}>响应速度</option>
+            </select></label>
+          </div>
+          <div class="model-tools-group selection-tools" role="group" aria-label="模型选择与测试">
+            <button type="button" class="btn sm" id="dwToggleSelection" ${modelControlsDisabled?"disabled":""} title="${selectedCount ? "清空当前选择" : "选择全部模型"}" aria-label="${selectedCount ? "清空当前选择" : "选择全部模型"}">${selectedCount ? "清空已选" : "全选"}</button>
+            <button type="button" class="btn primary sm" id="dwBatch" data-controls-disabled="${modelControlsDisabled?"true":"false"}" ${batchDisabled?"disabled":""} aria-busy="${batchBusy?"true":"false"}" title="${batchBusy?"正在批量测试选中的模型":selectedCount?"测试选中的模型":"请先选择要测试的模型"}">${batchBusy?SPINNER_ICON+"批量测试中…":"测试选中"}</button>
+          </div>
         </div>
       </div>
       ${st.status.modelListError?`<div class="models-error">最近获取失败：${esc(st.status.modelListError)}</div>`:""}
       <div class="models" id="dwModels">${modelsHtml}</div>
+      ${requestLogPanelMarkup(st)}
     </div>
 
     <div class="sec">
-      <div class="sec-h"><span class="title">连接信息</span><button type="button" class="btn sm connection-edit" data-edit-station="${esc(st.id)}" data-focus-field="f_baseurl" title="${stationBusy?"请求进行中，暂不能编辑":"编辑 Base URL 与 API Key"}" ${stationBusy?"disabled":""}>${EDIT_ICON}<span>编辑</span></button></div>
+      <div class="sec-h"><span class="title">连接信息</span></div>
       <div class="connection-grid">
         <div class="field"><label>Base URL</label><div class="val"><span class="txt">${esc(st.baseurl)}</span><button type="button" data-copy="${esc(st.baseurl)}" title="复制 Base URL" aria-label="复制 Base URL">${COPY_ICON}</button></div></div>
         <div class="field"><label>API Key</label><div class="val">${apiKeyControlsMarkup(st,{detail:true,displayId:"dwKey",toggleId:"dwKeyToggle"})}</div></div>
@@ -2061,20 +2810,15 @@ function detailHTML(st, isFocus){
       </div>
     </div>
 
-    <div class="detail-footer" aria-label="站点管理">
-      <div class="detail-footer-copy"><span class="detail-footer-title">危险操作</span><span class="detail-footer-hint">删除站点后无法恢复</span></div>
-      <div class="detail-footer-actions">
-        <button type="button" class="btn station-delete" id="dwDel" title="${stationBusy?"请求进行中，暂不能删除":"删除此站点"}" ${stationBusy?"disabled":""}>${TRASH_ICON}<span>删除站点</span></button>
-      </div>
-    </div>
   `;
 }
 
 // 详情重绘时除了像素滚动量，还保存当前可见模型锚点与焦点，避免 100 个模型的状态刷新把用户甩回列表顶部。
-function captureDetailRenderState(container){
+function captureDetailRenderState(container, options={}){
+  const preserveModelAnchor=options.preserveModelAnchor !== false;
   const models=container.querySelector(".models");
   let modelAnchor=null;
-  if(models){
+  if(preserveModelAnchor && models){
     const modelsRect=models.getBoundingClientRect();
     const visible=[...models.querySelectorAll(".model")].find(card=>card.getBoundingClientRect().bottom > modelsRect.top + 1);
     if(visible){
@@ -2126,8 +2870,8 @@ function restoreDetailRenderState(container, state){
     try{ nextFocus.focus({ preventScroll:true }); }catch(_){ nextFocus.focus(); }
   }
 }
-function renderDetailInto(container, st, isFocus){
-  const state=captureDetailRenderState(container);
+function renderDetailInto(container, st, isFocus, options={}){
+  const state=captureDetailRenderState(container, options);
   container.innerHTML = detailHTML(st, isFocus);
   bindDetail(container, st);
   restoreDetailRenderState(container,state);
@@ -2136,28 +2880,39 @@ function renderDetailInto(container, st, isFocus){
 // 绑定详情内所有按钮与勾选框
 function bindDetail(c, st){
   const id = st.id;
-  const conn=c.querySelector("#dwConn"); if(conn && !conn.disabled) conn.onclick=()=>testConnectivity(id);
   const proxySetup=c.querySelector("#dwProxySetup"); if(proxySetup) proxySetup.onclick=openSettings;
   const bal=c.querySelector("#dwBal"); if(bal && !bal.disabled) bal.onclick=()=>fetchBalance(id);
   const fet=c.querySelector("#dwFetch"); if(fet && !fet.disabled) fet.onclick=()=>fetchModels(id);
-  const bat=c.querySelector("#dwBatch"); if(bat && !bat.disabled) bat.onclick=()=>batchTest(id);
+  const sort=c.querySelector("#dwModelSort"); if(sort && !sort.disabled) sort.onchange=()=>setModelSort(sort.value);
+  // 批量按钮初始会因“未选择模型”而禁用；仍需预先绑定，勾选后动态启用才能正常触发。
+  const bat=c.querySelector("#dwBatch"); if(bat) bat.onclick=()=>batchTest(id);
   // 勾选框 → 维护 selectedModels 唯一真源
   c.querySelectorAll("#dwModels input[type=checkbox]").forEach(ch=>{
     ch.onchange=()=>{
       if(ch.checked) selectedModels.add(ch.dataset.m); else selectedModels.delete(ch.dataset.m);
+      rememberCurrentModelSelection();
       const card=ch.closest(".model"); if(card) card.classList.toggle("selected",ch.checked);
       updateSelectionCount(c, st);
     };
   });
-  const sa=c.querySelector("#dwSelAll"); if(sa && !sa.disabled) sa.onclick=()=>{ c.querySelectorAll("#dwModels input").forEach(ch=>{ch.checked=true; selectedModels.add(ch.dataset.m); ch.closest(".model")?.classList.add("selected");}); updateSelectionCount(c, st); };
-  const sn=c.querySelector("#dwSelNone"); if(sn && !sn.disabled) sn.onclick=()=>{ c.querySelectorAll("#dwModels input").forEach(ch=>{ch.checked=false; ch.closest(".model")?.classList.remove("selected");}); selectedModels.clear(); updateSelectionCount(c, st); };
+  const selectionToggle=c.querySelector("#dwToggleSelection");
+  if(selectionToggle && !selectionToggle.disabled) selectionToggle.onclick=()=>{
+    // 只按当前站点可见模型判断，避免旧列表 ID 残留时把“全选/清空”语义弄反。
+    const visibleSelectedCount=st.models.reduce((count,model)=>count+(selectedModels.has(model.id)?1:0),0);
+    const selectAll=st.models.length>0 && visibleSelectedCount===0;
+    // 选择集只保存当前站点当前列表的模型，模型列表更新后不保留失效 ID。
+    selectedModels.clear();
+    c.querySelectorAll("#dwModels input").forEach(ch=>{
+      ch.checked=selectAll;
+      if(selectAll) selectedModels.add(ch.dataset.m);
+      ch.closest(".model")?.classList.toggle("selected",selectAll);
+    });
+    rememberCurrentModelSelection();
+    updateSelectionCount(c, st);
+  };
   c.querySelectorAll("[data-model-test]").forEach(button=>{
     if(!button.disabled) button.onclick=()=>testModel(id, button.dataset.modelTest);
   });
-  c.querySelectorAll("[data-edit-station]").forEach(button=>{
-    if(!button.disabled) button.onclick=()=>openForm(button.dataset.editStation, { focusField:button.dataset.focusField || "" });
-  });
-  const dl=c.querySelector("#dwDel"); if(dl) dl.onclick=()=>openDelete(id);
   bindApiKeyControls(c);
   c.querySelectorAll("[data-copy]").forEach(b=> b.onclick=()=>copyText(b.dataset.copy));
   const back=c.querySelector("#dwBack"); if(back) back.onclick=closeFocus;
@@ -2166,6 +2921,19 @@ function updateSelectionCount(container, st){
   const count=st.models.reduce((total,model)=>total+(selectedModels.has(model.id)?1:0),0);
   const label=container.querySelector(".selection-count");
   if(label) label.textContent="已选 " + count + " · 并发 " + settings.concurrency;
+  const selectionToggle=container.querySelector("#dwToggleSelection");
+  if(selectionToggle){
+    const clearSelection=count>0;
+    selectionToggle.textContent=clearSelection ? "清空已选" : "全选";
+    selectionToggle.title=clearSelection ? "清空当前选择" : "选择全部模型";
+    selectionToggle.setAttribute("aria-label",selectionToggle.title);
+  }
+  const batch=container.querySelector("#dwBatch");
+  if(batch){
+    const controlsDisabled=batch.dataset.controlsDisabled === "true";
+    batch.disabled=controlsDisabled || count===0;
+    batch.title=batch.getAttribute("aria-busy")==="true" ? "正在批量测试选中的模型" : count ? "测试选中的模型" : "请先选择要测试的模型";
+  }
 }
 
 // 复制：优先 Clipboard API（需安全上下文 https/localhost）；非安全上下文（如局域网 http）降级 execCommand
@@ -2211,15 +2979,22 @@ function recognizeQuickImport(){
     if(existing){
       // 已识别出的凭据无需继续滞留在粘贴框；用户可直接打开现有站点。
       document.getElementById("quickImportText").value="";
-      setQuickImportFeedback("该配置已存在，不会重复新增。", "warn", existing.id);
+      setQuickImportFeedback(duplicateStationMessage(existing), "warn", existing.id);
       return;
     }
-    document.getElementById("f_name").value=config.name;
-    document.getElementById("f_baseurl").value=config.baseurl;
-    setFormApiKeyValue(config.apikey);
+    // 仅补全当前为空的字段，保留用户已经手动输入的内容（尤其手敲的 API Key）。
+    const skipped=[];
+    const nameEl=document.getElementById("f_name");
+    if(!nameEl.value.trim()) nameEl.value=config.name; else skipped.push("名称");
+    const urlEl=document.getElementById("f_baseurl");
+    if(!urlEl.value.trim()) urlEl.value=config.baseurl; else skipped.push("Base URL");
+    if(!readFormApiKeyValue()) setFormApiKeyValue(config.apikey); else skipped.push("API Key");
     // 成功后立即清除原始粘贴内容，避免明文 Key 长时间留在 textarea 中。
     document.getElementById("quickImportText").value="";
-    setQuickImportFeedback("已识别并填入："+config.name+"。请确认后保存。", "success");
+    setQuickImportFeedback(
+      skipped.length ? "已填入空白字段；"+skipped.join("、")+"已保留你的输入。请确认后保存。" : "已识别并填入："+config.name+"。请确认后保存。",
+      "success"
+    );
   }catch(error){
     setQuickImportFeedback(text(error && error.message, 240) || "识别失败，请检查配置格式。", "error");
   }
@@ -2228,7 +3003,6 @@ function openQuickImportExisting(){
   const id=quickImportExistingId;
   if(!id || !getById(id)) return;
   hideModal("formModal");
-  selectedModels=new Set();
   if(settings.view==="grid" || isNarrow()) openFocus(id);
   else selectStation(id);
 }
@@ -2264,6 +3038,7 @@ function openForm(id, options={}){
   },50);
 }
 function resetStationRuntime(st){
+  modelDisplaySnapshots.delete(st.id);
   st.status = { connectivity:"unknown", latency:null, balance:null, balanceKind:"balance", balanceUnlimited:false, balanceUnit:null, balanceSource:null, balanceNote:null, balanceRaw:null, balanceError:null, modelListError:null, lastTest:null, error:null, transport:null, authMode:"bearer" };
   st.models = [];
 }
@@ -2279,33 +3054,50 @@ function saveForm(){
   if(!name || !text(rawBaseurl) || !apikey){ toast("名称、Base URL、API Key 均为必填","warn"); return; }
   if(!baseurl){ toast("请输入有效的 http(s) Base URL","warn"); return; }
   if(balancePath === null){ toast("余额接口路径只能是站内相对路径","warn"); return; }
-  if(findSameStation(baseurl, apikey, editingId)){
-    toast("相同 Base URL 和 API Key 的站点已存在，请勿重复添加", "warn");
+  const duplicate=findSameStation(baseurl, apikey, editingId);
+  if(duplicate){
+    toast(duplicateStationMessage(duplicate), "warn");
     return;
   }
 
+  const scrollState=captureScrollState();
+  let persisted=false;
   if(editingId){
     const st = getById(editingId);
     if(!st){ hideModal("formModal"); return; }
     const connectionChanged = st.baseurl !== baseurl || st.apikey !== apikey;
     const balancePathChanged = st.balancePath !== balancePath;
+    // 持久化失败时需要把单站状态还原到 Object.assign 之前，避免内存与磁盘脱节却谎报成功。
+    const stationSnapshot=JSON.stringify(st);
     Object.assign(st, { name, baseurl, apikey, group, note, balancePath });
     // 更换服务地址或密钥后，旧连通性/余额/模型测试均不再可信；让迟到请求失效。
-    if(connectionChanged){ revealedApiKeyIds.delete(st.id); invalidateStation(st.id); resetStationRuntime(st); selectedModels.clear(); }
+    if(connectionChanged){ revealedApiKeyIds.delete(st.id); invalidateStation(st.id); resetStationRuntime(st); selectedModelsByStation.delete(st.id); if((focusId || selectedId)===st.id) selectedModels.clear(); }
     else if(balancePathChanged){
       // 自定义余额路径变更时同样使未完成请求失效，防止旧路径的响应回写新配置。
       invalidateStation(st.id);
       st.status.balance=null; st.status.balanceKind="balance"; st.status.balanceUnlimited=false;
       st.status.balanceUnit=null; st.status.balanceSource=null; st.status.balanceNote=null; st.status.balanceRaw=null; st.status.balanceError=null;
     }
+    persisted=save();
+    if(!persisted){
+      // 还原单站字段；invalidate/resetStationRuntime 产生的运行时标记对用户不可见，无需回退。
+      Object.assign(st, JSON.parse(stationSnapshot));
+      toast("保存失败：浏览器存储不可用（已满或被禁用），请先导出备份再清理空间","err");
+      return;   // 不关弹窗、不渲染，让用户看到错误并决定如何处理
+    }
     toast("已保存修改","ok");
   } else {
+    const stationsSnapshot=JSON.stringify(stations);
     const maxOrder = stations.reduce((m,s)=>Math.max(m, s.order), -1);
     stations.push(normalizeStation({ id:uid(), name, baseurl, apikey, group, note, balancePath, order:maxOrder+1 }));
+    persisted=save();
+    if(!persisted){
+      stations=JSON.parse(stationsSnapshot);   // 弹出刚 push 的站点，内存与磁盘保持一致
+      toast("保存失败：浏览器存储不可用（已满或被禁用），请先导出备份再清理空间","err");
+      return;
+    }
     toast("已添加「"+name+"」","ok");
   }
-  const scrollState=captureScrollState();
-  save();
   // 先关闭覆盖层，再以原视口位置更新背景，避免「保存」瞬间看到整页重排。
   hideModal("formModal",{ restoreFocus:false });
   render({ scrollState });
@@ -2321,15 +3113,34 @@ function openDelete(id){
 function doDelete(){
   const st = getById(deletingId); if(!st) return;
   const scrollState=focusId===deletingId ? (focusReturnScroll || captureScrollState()) : captureScrollState();
+  // 删除是结构性变更，持久化失败需整体还原，否则刷新后“已删除”的站点又回来了却无人提示。
+  const stationsSnapshot=JSON.stringify(stations);
+  const prevSelectedId=selectedId, prevFocusId=focusId, prevFocusReturnScroll=focusReturnScroll, prevFocusReturnStationId=focusReturnStationId;
   invalidateStation(deletingId); // 删除后忽略所有未结束网络请求的迟到响应
   revealedApiKeyIds.delete(deletingId);
+  const wasActiveStation = selectedId === deletingId || focusId === deletingId;
   stations = stations.filter(s=>s.id!==deletingId);
+  selectedModelsByStation.delete(deletingId);
   stations.forEach((s,i)=> s.order=i);                       // 重整 order
   if(selectedId===deletingId) selectedId = stations.length ? stations[0].id : null;  // 选中项重定向
   if(focusId===deletingId){ focusId = null; focusReturnScroll=null; focusReturnStationId=null; } // 专注页关闭并回到进入前的位置
-  selectedModels.clear();
+  // 仅当删除的正是当前展示站点时才重置勾选，并立即恢复新站点已保存的选择；
+  // 删除其它站点不得清空当前站点的勾选，否则界面会与持久化数据脱节。
+  if(wasActiveStation){
+    selectedModels.clear();
+    if(selectedId) restoreModelSelection(selectedId);
+  }
+  const uiOk=saveUIState();
+  const dataOk=save();
+  if(!dataOk || !uiOk){
+    // 还原全部结构性状态，保持删除弹窗打开以便用户处理存储问题后再试。
+    stations=JSON.parse(stationsSnapshot);
+    selectedId=prevSelectedId; focusId=prevFocusId; focusReturnScroll=prevFocusReturnScroll; focusReturnStationId=prevFocusReturnStationId;
+    deletingId=null;
+    toast("删除失败：浏览器存储不可用（已满或被禁用），请先导出备份再清理空间","err");
+    return;
+  }
   deletingId=null;
-  save();
   hideModal("delModal",{ restoreFocus:false });
   render({ scrollState });
   toast("已删除","ok");
@@ -2337,7 +3148,27 @@ function doDelete(){
 
 /* ---------------- 导入/导出 ---------------- */
 function exportJSON(){
-  const data = { version:VERSION, exportedAt:new Date().toISOString(), settings, stations };
+  // 导出只包含本项目定义的站点记录；显式列出字段，避免把浏览器会话/其它项目对象混入备份。
+  const stationRecords=stations.map(st=>({
+    id:st.id,
+    name:st.name,
+    baseurl:st.baseurl,
+    apikey:st.apikey,
+    group:st.group,
+    note:st.note,
+    balancePath:st.balancePath,
+    order:st.order,
+    status:st.status,
+    models:st.models
+  }));
+  const data = {
+    format:EXPORT_FORMAT,
+    schemaVersion:1,
+    version:VERSION,
+    exportedAt:new Date().toISOString(),
+    settings,
+    stations:stationRecords
+  };
   const blob = new Blob([JSON.stringify(data,null,2)], {type:"application/json"});
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -2355,25 +3186,66 @@ function importJSON(file){
   reader.onload = ()=>{
     try{
       const data = JSON.parse(reader.result);
-      const incoming = Array.isArray(data) ? data : data && data.stations;   // 兼容「裸数组」与「带元信息对象」
-      if(!Array.isArray(incoming)) throw new Error("找不到 stations 数组");
-      if(incoming.length > 2000) throw new Error("一次最多导入 2000 个中转站");
-      const importSettings = !Array.isArray(data) && data && data.settings && typeof data.settings === "object" && !Array.isArray(data.settings) ? data.settings : null;
-       const importHasProxy = !!importSettings && Object.prototype.hasOwnProperty.call(importSettings,"proxy");
-       const skippedProxy = !!importHasProxy && text(importSettings.proxy) !== settings.proxy;
-       const normalized = normalizeStations(incoming);
-       const norm = normalized.filter(hasStationCredentials);
-       const skippedInvalid = normalized.length - norm.length;
-       if(!norm.length) throw new Error("备份中没有包含有效 Base URL 与 API Key 的站点");
-       // 导入会按 ID 覆盖站点配置；先使全部旧请求失效，防止旧地址/密钥的迟到响应回写到同 ID 新站点。
-       stations.forEach(station=>invalidateStation(station.id));
-       // 同 ID 覆盖原位置，新 ID 追加；Map 避开对象原型键带来的污染风险。
-       const merged = stations.slice();
-      const indices = new Map(merged.map((station,index)=>[station.id,index]));
-      norm.forEach(station=>{
-        if(indices.has(station.id)) merged[indices.get(station.id)] = station;
-        else { indices.set(station.id, merged.length); merged.push(station); }
+      // 只接受本项目明确导出的对象格式；兼容早期 AIHubPanel 的“stations”对象，
+      // 但拒绝裸数组、session-out.json（records/rawHits）以及未知会话结构，
+      // 这样既能恢复本项目旧备份，也不会把其它项目会话误当成站点配置写入本地存储。
+      const isCurrentBackup = !!data && typeof data === "object" && !Array.isArray(data) && data.format === EXPORT_FORMAT;
+      const legacyStations = !!data && typeof data === "object" && !Array.isArray(data) &&
+        data.format == null && Array.isArray(data.stations) &&
+        !Object.prototype.hasOwnProperty.call(data,"records") && !Object.prototype.hasOwnProperty.call(data,"rawHits") &&
+        data.stations.every(item=>item && typeof item === "object" &&
+          (Object.prototype.hasOwnProperty.call(item,"baseurl") || Object.prototype.hasOwnProperty.call(item,"baseURL")) &&
+          (Object.prototype.hasOwnProperty.call(item,"apikey") || Object.prototype.hasOwnProperty.call(item,"apiKey")));
+      if(!isCurrentBackup && !legacyStations){
+        throw new Error("这不是 AIHubPanel 站点备份文件，未导入其它项目会话数据");
+      }
+      if(data.schemaVersion != null && Number(data.schemaVersion) > 1){
+        throw new Error("站点备份版本过新，请先升级 AIHubPanel");
+      }
+      const rawIncoming = data.stations;
+      if(!Array.isArray(rawIncoming)) throw new Error("这不是 AIHubPanel 站点备份文件（未找到 stations 数组）");
+      // 早期备份可能使用 baseURL/apiKey 大小写；仅在已通过上面的站点白名单后做字段归一化。
+      const incoming = rawIncoming.map(item=>{
+        if(!item || typeof item !== "object") return item;
+        const normalized = { ...item };
+        if(normalized.baseurl == null && typeof normalized.baseURL === "string") normalized.baseurl = normalized.baseURL;
+        if(normalized.apikey == null && typeof normalized.apiKey === "string") normalized.apikey = normalized.apiKey;
+        return normalized;
       });
+      if(incoming.length > 2000) throw new Error("一次最多导入 2000 个中转站");
+      const importSettings = data.settings && typeof data.settings === "object" && !Array.isArray(data.settings) ? data.settings : null;
+      const importHasProxy = !!importSettings && Object.prototype.hasOwnProperty.call(importSettings,"proxy");
+      const skippedProxy = !!importHasProxy && text(importSettings.proxy) !== settings.proxy;
+      const normalized = normalizeStations(incoming);
+      const norm = normalized.filter(hasStationCredentials);
+      const skippedInvalid = normalized.length - norm.length;
+      if(!norm.length) throw new Error("备份中没有包含有效 Base URL 与 API Key 的站点");
+      // 同 ID 只恢复同一条记录；不同 ID 但 URL+Key 完全相同的记录不再新增，并报告已有站点名。
+      const merged = stations.slice();
+      const indices = new Map(merged.map((station,index)=>[station.id,index]));
+      const duplicateNotes=[];
+      let importedCount=0;
+      norm.forEach(station=>{
+        const targetIndex=indices.has(station.id) ? indices.get(station.id) : -1;
+        const credentialKey=stationCredentialKey(station.baseurl,station.apikey);
+        const conflict=merged.find((candidate,index)=>index!==targetIndex && stationCredentialKey(candidate.baseurl,candidate.apikey)===credentialKey);
+        if(conflict){
+          duplicateNotes.push(`导入项「${text(station.name,120)||"未命名"}」：${duplicateStationMessage(conflict)}`);
+          return;
+        }
+        if(targetIndex>=0){
+          invalidateStation(merged[targetIndex].id);
+          merged[targetIndex]=station;
+        }else{
+          indices.set(station.id,merged.length);
+          merged.push(station);
+        }
+        importedCount++;
+      });
+      // 导入是结构性变更；持久化失败必须整体还原，避免刷新后导入项丢失却谎报成功。
+      const prevStationsSnapshot=JSON.stringify(stations);
+      const prevSettingsSnapshot=JSON.stringify(settings);
+      const prevSelectedId=selectedId, prevFocusId=focusId, prevFocusReturnScroll=focusReturnScroll, prevFocusReturnStationId=focusReturnStationId;
       stations = merged;
       // 导入可能替换同 ID 的密钥，完整显示状态不跨导入保留。
       revealedApiKeyIds.clear();
@@ -2385,9 +3257,27 @@ function importJSON(file){
       }
       selectedId = getById(selectedId) ? selectedId : (stations[0] ? stations[0].id : null);
       if(focusId && !getById(focusId)){ focusId = null; focusReturnScroll=null; focusReturnStationId=null; }
+      selectedModelsByStation = new Map();
       selectedModels.clear();
-      save(); saveSettings(); render();
-       toast("已导入 "+norm.length+" 个中转站（按 ID 合并）" + (skippedInvalid ? "；已跳过 "+skippedInvalid+" 个缺少配置的站点" : "") + (skippedProxy ? "；代理设置未自动导入" : ""),"ok");
+      restoreModelSelection(selectedId);
+      const dataOk=save();
+      const settingsOk=saveSettings();
+      const uiOk=saveUIState();
+      if(!dataOk || !settingsOk || !uiOk){
+        // 还原导入前的全部状态并抛错走统一 catch，确保给出明确失败提示。
+        stations=JSON.parse(prevStationsSnapshot);
+        settings=normalizeSettings(JSON.parse(prevSettingsSnapshot));
+        selectedId=prevSelectedId; focusId=prevFocusId; focusReturnScroll=prevFocusReturnScroll; focusReturnStationId=prevFocusReturnStationId;
+        selectedModelsByStation = new Map();
+        selectedModels.clear();
+        restoreModelSelection(selectedId);
+        applyTheme(); updateThemeBtn(); render();
+        throw new Error("浏览器存储不可用（已满或被禁用），导入已回滚，请先清理空间再重试");
+      }
+      render();
+      const duplicateText=duplicateNotes.length ? "；"+duplicateNotes.slice(0,4).join("；")+(duplicateNotes.length>4?`；另有 ${duplicateNotes.length-4} 个重复项` : "") : "";
+      const importedText=importedCount ? `已导入 ${importedCount} 个中转站（每站独立记录）` : "没有新增站点";
+      toast(importedText + duplicateText + (skippedInvalid ? "；已跳过 "+skippedInvalid+" 个缺少配置的站点" : "") + (skippedProxy ? "；代理设置未自动导入" : ""), importedCount ? "ok" : "warn");
     }catch(e){
       toast("导入失败：" + e.message, "err");
     }
@@ -2416,21 +3306,28 @@ function openSettings(){
   document.getElementById("s_concurrency").value = settings.concurrency;
   document.getElementById("s_timeout").value = settings.timeout;
   document.getElementById("s_view").value = settings.view;
-  const proxyHint=document.getElementById("s_proxy_hint");
-  if(proxyHint) proxyHint.textContent=IS_EXTENSION_PAGE
-    ? "扩展已获得 HTTP(S) 请求权限；留空时直接请求站点。填入的代理会收到请求与 API Key，请只使用你信任的地址。"
-    : "本地通过 server.mjs 打开时，会在浏览器跨域请求失败后自动使用同源转发；它不会影响其它网页。填入的代理会收到请求与 API Key，请只使用你信任的地址。";
   showModal("setModal");
 }
 function saveSettingsModal(){
+  const settingsSnapshot=JSON.stringify(settings);
   applySettings({
+    // 排序属于全局展示偏好，设置窗口不提供改动项时必须保留当前选择。
+    modelSort: settings.modelSort,
     theme: document.getElementById("s_theme").value,
     proxy: document.getElementById("s_proxy").value,
     concurrency: document.getElementById("s_concurrency").value,
     timeout: document.getElementById("s_timeout").value,
     view: document.getElementById("s_view").value
   });
-  save(); saveSettings(); render(); hideModal("setModal");
+  const dataOk=save();
+  const settingsOk=saveSettings();
+  if(!dataOk || !settingsOk){
+    settings=normalizeSettings(JSON.parse(settingsSnapshot));
+    applyTheme(); updateThemeBtn(); render();
+    toast("设置保存失败：浏览器存储不可用（已满或被禁用），请先导出备份再清理空间","err");
+    return;
+  }
+  render(); hideModal("setModal");
   applyTheme(); updateThemeBtn();
   toast("设置已保存","ok");
 }
@@ -2543,7 +3440,8 @@ function bindGlobal(){
     const b = e.target.closest("button[data-view]"); if(!b) return;
     if(settings.view===b.dataset.view && !focusId) return;
     const scrollState=focusId ? (focusReturnScroll || captureScrollState()) : captureScrollState();
-    settings.view = b.dataset.view; saveSettings(); focusId=null; focusReturnScroll=null; focusReturnStationId=null; selectedModels=new Set(); render({ scrollState });
+    rememberCurrentModelSelection();
+    settings.view = b.dataset.view; saveSettings(); focusId=null; focusReturnScroll=null; focusReturnStationId=null; restoreModelSelection(selectedId); saveUIState(); render({ scrollState });
   });
   document.getElementById("search").addEventListener("input", render);
   document.getElementById("btnAdd").onclick = ()=> openForm(null);
@@ -2639,9 +3537,11 @@ function bindGlobal(){
     document.getElementById("advToggle").textContent = (show?"▾ ":"▸ ")+"高级选项";
     document.getElementById("advToggle").setAttribute("aria-expanded", String(show));
   };
-  // 弹窗关闭：点取消 / 点遮罩空白处
+  // 站点填写/编辑包含敏感配置，遮罩和 Esc 都不能误关；只能由明确的取消/关闭控件退出。
   document.querySelectorAll("[data-close]").forEach(b=> b.onclick = ()=> hideModal(b.dataset.close));
-  document.querySelectorAll(".modal").forEach(m=> m.addEventListener("click", e=>{ if(e.target===m) hideModal(m.id); }));
+  document.querySelectorAll(".modal").forEach(m=> m.addEventListener("click", e=>{
+    if(e.target===m && m.dataset.backdropClose!=="false") hideModal(m.id);
+  }));
 
   // 键盘快捷键：Esc 关弹窗/退出专注；/ 聚焦搜索；N 新建
   document.addEventListener("keydown", e=>{
@@ -2657,7 +3557,11 @@ function bindGlobal(){
     }
     if(e.key==="Escape"){
       if(isMoreMenuOpen()){ closeMoreMenu(true); return; }
-      if(openModal){ hideModal(openModal.id); return; }
+      if(openModal){
+        if(openModal.id!=="formModal") hideModal(openModal.id);
+        else e.preventDefault();
+        return;
+      }
       if(focusId){ closeFocus(); return; }
     }
     if(openModal && quickImportActive && (e.ctrlKey || e.metaKey) && e.key==="Enter"){
@@ -2695,7 +3599,10 @@ function bindGlobal(){
 
 /* ---------------- 启动 ---------------- */
 load();
-selectedId = stations.length ? stations[0].id : null;   // 默认选中第一个，便于宽屏直接显示详情
+// 首次打开默认选第一站；若 UI 状态中仍有有效站点，则保持用户上次选择。
+selectedId = getById(selectedId) ? selectedId : (stations.length ? stations[0].id : null);
+restoreModelSelection(selectedId);
+saveUIState();
 applyTheme();
 updateThemeBtn();
 bindGlobal();

@@ -1,5 +1,8 @@
 .playwright-cli/
+.playwright-mcp/
 .workbuddy/
+.mimosa/
+.zcode/
 doubao-tabpanel/
 design/
 session-out.json

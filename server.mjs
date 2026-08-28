@@ -18,8 +18,19 @@ const PROXY_PATH = "/api/proxy";
 const PROXY_HEALTH_PATH = "/api/proxy/health";
 const PROXY_TIMEOUT_MS = Math.min(Math.max(Number(process.env.AI_HUB_PROXY_TIMEOUT_MS) || 120000, 1000), 120000);
 const PROXY_MAX_BODY_BYTES = 10 * 1024 * 1024;
-const ALLOWED_PROXY_ORIGIN = normaliseConfiguredOrigin(process.env.AI_HUB_ALLOWED_ORIGIN);
-const LOOPBACK_PROXY_ORIGINS = new Set([`http://127.0.0.1:${PORT}`, `http://localhost:${PORT}`]);
+// 模型目录与诊断响应通常很小；为异常公网目标设置硬上限，避免 relay 长时间转发无限响应。
+const PROXY_MAX_RESPONSE_BYTES = 50 * 1024 * 1024;
+const RAW_ALLOWED_PROXY_ORIGIN = String(process.env.AI_HUB_ALLOWED_ORIGIN || "").trim();
+const ALLOWED_PROXY_ORIGIN = normaliseConfiguredOrigin(RAW_ALLOWED_PROXY_ORIGIN);
+const LOOPBACK_PROXY_ORIGINS = new Set([`http://127.0.0.1:${PORT}`, `http://localhost:${PORT}`, `http://[::1]:${PORT}`]);
+const IS_LOOPBACK_BIND = isLoopbackBindHost(HOST);
+if (RAW_ALLOWED_PROXY_ORIGIN && !ALLOWED_PROXY_ORIGIN) {
+  throw new Error("AI_HUB_ALLOWED_ORIGIN 必须是有效的 http(s) origin，例如 http://192.168.1.20:4179");
+}
+if (!IS_LOOPBACK_BIND && !ALLOWED_PROXY_ORIGIN) {
+  throw new Error("非回环监听必须显式设置 AI_HUB_ALLOWED_ORIGIN，避免同源转发被伪造成开放代理");
+}
+const PROXY_ORIGINS = new Set(ALLOWED_PROXY_ORIGIN ? [ALLOWED_PROXY_ORIGIN] : LOOPBACK_PROXY_ORIGINS);
 
 const TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -58,11 +69,17 @@ function isWithin(root, target) {
 function normaliseConfiguredOrigin(value) {
   if (!value) return null;
   try {
-    const origin = new URL(value).origin;
-    return origin === "null" ? null : origin;
+    const url = new URL(value);
+    if (!/^https?:$/.test(url.protocol) || url.username || url.password || url.pathname !== "/" || url.search || url.hash) return null;
+    return url.origin === "null" ? null : url.origin;
   } catch {
     return null;
   }
+}
+
+function isLoopbackBindHost(value) {
+  const host = String(value || "").trim().toLowerCase().replace(/^\[|\]$/g, "");
+  return host === "localhost" || host === "127.0.0.1" || host === "::1";
 }
 
 function sendProxyError(res, method, status, code, message) {
@@ -89,12 +106,6 @@ function sendProxyHealth(res, method) {
   else res.end();
 }
 
-function requestOrigin(req) {
-  const host = req.headers.host;
-  if (!host || /[\r\n]/.test(host)) return null;
-  return `${req.socket.encrypted ? "https" : "http"}://${host}`;
-}
-
 function originOf(value) {
   if (!value) return null;
   try {
@@ -104,22 +115,18 @@ function originOf(value) {
   }
 }
 
-// 浏览器会为同源 fetch 发送 Sec-Fetch-Site；同时校验请求 Host、Origin/Referer。
-// 默认只允许回环地址，局域网部署必须显式设置 AI_HUB_ALLOWED_ORIGIN，避免 DNS
-// rebinding 将这个端点退化为可被任意站点跨站调用的开放代理。
+// 只信任固定配置的 origin；绝不根据客户端可控的 Host 头动态推断允许源。
+// Sec-Fetch-Site 仅作为浏览器 CSRF 信号，不承担 LAN 身份认证职责。
 function isSameOriginProxyRequest(req) {
-  const requestHostOrigin = requestOrigin(req);
-  if (!requestHostOrigin) return false;
-  const expected = ALLOWED_PROXY_ORIGIN || (LOOPBACK_PROXY_ORIGINS.has(requestHostOrigin) ? requestHostOrigin : null);
-  if (!expected || requestHostOrigin !== expected) return false;
-  const origin = req.headers.origin;
-  const referer = req.headers.referer;
+  const origin = originOf(req.headers.origin);
+  const referer = originOf(req.headers.referer);
   const fetchSite = String(req.headers["sec-fetch-site"] || "").toLowerCase();
   if (fetchSite && fetchSite !== "same-origin") return false;
-  if (origin && origin !== expected) return false;
-  if (referer && originOf(referer) !== expected) return false;
-  // 非浏览器请求必须显式带同源 Origin 或 Referer；浏览器的同源 GET 可只有 Fetch Metadata。
-  return fetchSite === "same-origin" || origin === expected || originOf(referer) === expected;
+  if (origin && !PROXY_ORIGINS.has(origin)) return false;
+  if (referer && !PROXY_ORIGINS.has(referer)) return false;
+  if (origin || referer) return PROXY_ORIGINS.has(origin || referer);
+  // Chromium 同源 GET 可能只带 Fetch Metadata；仅在服务绑定回环时接受该情况。
+  return IS_LOOPBACK_BIND && fetchSite === "same-origin";
 }
 
 function ipv4Number(address) {
@@ -206,8 +213,10 @@ function proxyRequestHeaders(req) {
 function proxyResponseHeaders(headers) {
   const result = {};
   const skipped = new Set(["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "set-cookie"]);
+  const protectedHeaders = new Set([...Object.keys(BASE_HEADERS).map(name => name.toLowerCase()), "x-aihub-proxy"]);
   for (const [name, value] of Object.entries(headers)) {
-    if (!skipped.has(name.toLowerCase()) && value !== undefined) result[name] = value;
+    const lower = name.toLowerCase();
+    if (!skipped.has(lower) && !protectedHeaders.has(lower) && value !== undefined) result[name] = value;
   }
   return result;
 }
@@ -218,6 +227,8 @@ async function handleProxy(req, res, requestUrl) {
     sendProxyError(res, method, 405, "method_not_allowed", "仅支持 GET、POST 和 HEAD 请求");
     return;
   }
+  // GET/HEAD 通常没有请求体，但仍排空客户端可能附带的 chunked body，避免 keep-alive 连接残留。
+  if (method !== "POST") req.resume();
   if (!isSameOriginProxyRequest(req)) {
     sendProxyError(res, method, 403, "same_origin_required", "仅允许来自本面板同源页面的请求");
     return;
@@ -239,9 +250,6 @@ async function handleProxy(req, res, requestUrl) {
     sendProxyError(res, method, 400, "invalid_target", "仅允许不含账号信息的公网 HTTP(S) 地址");
     return;
   }
-  const redirectText = requestUrl.searchParams.get("redirect") || "0";
-  const redirectCount = /^\d{1,2}$/.test(redirectText) ? Number(redirectText) : 0;
-
   const contentLength = Number(req.headers["content-length"] || 0);
   if (!Number.isSafeInteger(contentLength) || contentLength < 0 || contentLength > PROXY_MAX_BODY_BYTES) {
     sendProxyError(res, method, 413, "body_too_large", "请求体不能超过 10 MiB");
@@ -290,39 +298,18 @@ async function handleProxy(req, res, requestUrl) {
     }
     const upstreamStatus = upstreamResponse.statusCode || 502;
     const upstreamHeaders = proxyResponseHeaders(upstreamResponse.headers);
-    const redirectLocation = typeof upstreamResponse.headers.location === "string" ? upstreamResponse.headers.location : "";
-    if ([301, 302, 303, 307, 308].includes(upstreamStatus) && redirectLocation) {
-      if (redirectCount >= 5) {
-        upstreamResponse.resume();
-        fail(508, "too_many_redirects", "上游重定向次数过多");
-        return;
-      }
-      let nextTarget;
-      try {
-        nextTarget = new URL(redirectLocation, target).toString();
-      } catch {
-        upstreamResponse.resume();
-        fail(502, "invalid_redirect", "上游返回了无效的重定向地址");
-        return;
-      }
-      // 上游的 Location 若原样下发，浏览器会离开同源转发并重新触发 CORS；改写为下一跳同源请求。
-      delete upstreamHeaders.location;
-      delete upstreamHeaders.Location;
-      delete upstreamHeaders["content-length"];
-      delete upstreamHeaders["Content-Length"];
+    if ([301, 302, 303, 307, 308].includes(upstreamStatus)) {
       upstreamResponse.resume();
-      res.writeHead(upstreamStatus, {
-        ...BASE_HEADERS,
-        "X-AIHub-Proxy": "1",
-        ...upstreamHeaders,
-        Location: `${PROXY_PATH}?url=${encodeURIComponent(nextTarget)}&redirect=${redirectCount + 1}`
-      });
-      res.end();
-      finished = true;
-      cleanup();
+      fail(502, "upstream_redirect_not_supported", "目标服务返回了重定向，请将 Base URL 改为最终的 HTTPS API 地址");
       return;
     }
-    res.writeHead(upstreamStatus, { ...BASE_HEADERS, "X-AIHub-Proxy": "1", ...upstreamHeaders });
+    const declaredLength = Number(upstreamResponse.headers["content-length"] || 0);
+    if (Number.isFinite(declaredLength) && declaredLength > PROXY_MAX_RESPONSE_BYTES) {
+      upstreamResponse.resume();
+      fail(502, "upstream_response_too_large", "上游响应超过 50 MiB 限制");
+      return;
+    }
+    res.writeHead(upstreamStatus, { ...upstreamHeaders, ...BASE_HEADERS, "X-AIHub-Proxy": "1" });
     if (method === "HEAD") {
       upstreamResponse.resume();
       res.end();
@@ -330,8 +317,20 @@ async function handleProxy(req, res, requestUrl) {
       cleanup();
       return;
     }
+    const responseLimit = new Transform({
+      transform(chunk, _encoding, callback) {
+        this.bytes = (this.bytes || 0) + chunk.length;
+        if (this.bytes > PROXY_MAX_RESPONSE_BYTES) {
+          callback(Object.assign(new Error("response-too-large"), { code: "RESPONSE_TOO_LARGE" }));
+        } else callback(null, chunk);
+      }
+    });
+    responseLimit.on("error", error => {
+      upstreamResponse.destroy(error);
+      if (!res.destroyed) res.destroy();
+    });
     upstreamResponse.on("error", () => res.destroy());
-    upstreamResponse.pipe(res);
+    upstreamResponse.pipe(responseLimit).pipe(res);
     res.on("finish", () => {
       finished = true;
       cleanup();
@@ -393,7 +392,10 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (pathname === PROXY_PATH) {
-    void handleProxy(req, res, requestUrl);
+    void handleProxy(req, res, requestUrl).catch(error => {
+      console.error(`本地转发内部错误：${error instanceof Error ? error.message : String(error)}`);
+      sendProxyError(res, method, 500, "proxy_internal_error", "本地转发内部错误，请稍后重试");
+    });
     return;
   }
   if (method !== "GET" && method !== "HEAD") {
@@ -440,14 +442,14 @@ const server = http.createServer((req, res) => {
 server.on("error", error => {
   console.error(`静态服务启动失败：${error.message}`);
   process.exitCode = 1;
+  if (!server.listening) server.close(() => process.exit(1));
 });
 
 server.listen(PORT, HOST, () => {
-  const shown = HOST === "0.0.0.0" ? "127.0.0.1" : HOST;
   console.log(`中转站管理面板已启动：`);
-  console.log(`  本机：  http://${shown}:${PORT}`);
-  if (HOST === "0.0.0.0") {
-    console.log(`  局域网：http://<本机局域网IP>:${PORT}  （需设置 AI_HUB_ALLOWED_ORIGIN 才能使用同源转发）`);
-  }
+  console.log(`  监听：${HOST}:${PORT}`);
+  console.log(`  本机：http://127.0.0.1:${PORT}`);
+  if (IS_LOOPBACK_BIND) console.log(`  同源转发允许：http://127.0.0.1:${PORT}、http://localhost:${PORT}、http://[::1]:${PORT}`);
+  else console.log(`  同源转发允许：${ALLOWED_PROXY_ORIGIN}`);
   console.log(`  本服务会在浏览器跨域请求失败时提供受限同源转发；静态部署仅支持目标站已开启 CORS 的直连请求。`);
 });

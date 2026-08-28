@@ -5,18 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta name="color-scheme" content="light dark" />
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%232E6BE6'/%3E%3Cpath d='M18 22h28M18 32h20M18 42h12' stroke='white' stroke-width='6' stroke-linecap='round'/%3E%3C/svg%3E" />
-<title>中转站管理 · AIHubPanel</title>
+<title>AIHubPanel · 中转站管理 · 轻量面板</title>
 <link rel="stylesheet" href="app.css" />
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
       <div class="brand-line">
-        <h1>中转站管理</h1>
+        <h1>AIHubPanel</h1>
         <span class="version-badge" title="AIHubPanel 当前版本" aria-label="当前版本 v8">v8</span>
         <div class="title-stats" id="titleStats"></div>
       </div>
-      <span class="sub">AIHubPanel · 局域网轻量面板</span>
+      <span class="sub">中转站管理 · 轻量面板</span>
     </div>
     <div class="actions">
       <!-- 视图切换：grid=卡片点开整页专注；list=左列表+右详情常驻 -->
@@ -37,7 +37,7 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       </button>
       <!-- 快速导入只识别粘贴配置；文件导入用于恢复完整备份。文件框仍作为兄弟节点隐藏（见 CSS #fileInput）。 -->
-      <button type="button" class="btn action" id="btnQuickImport" title="粘贴 Base URL 与 API Key 配置并识别" aria-label="快速导入站点">
+      <button type="button" class="btn action" id="btnQuickImport" title="粘贴站点配置并识别，支持 NewAPI 连接导出" aria-label="快速导入站点">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2"/></svg>
         快速导入
       </button>
@@ -91,13 +91,13 @@
   </main>
 
   <!-- 添加/编辑弹窗 -->
-  <div class="modal" id="formModal" aria-hidden="true">
+  <div class="modal" id="formModal" aria-hidden="true" data-backdrop-close="false">
     <form class="panel wide" id="stationForm" role="dialog" aria-modal="true" aria-labelledby="formTitle">
       <header id="formTitle">添加中转站</header>
       <div class="content">
         <section class="quick-import" id="quickImportBox" hidden aria-labelledby="quickImportTitle">
-          <div class="quick-import-head"><span class="quick-import-title" id="quickImportTitle">粘贴站点配置</span><span class="hint">同一对象的 baseURL + apiKey；支持截断 JSON，仅预填不保存。</span></div>
-          <textarea id="quickImportText" maxlength="20480" placeholder='可粘贴完整 JSON、任意包含 baseURL 与 apiKey 的 JSON 片段，末尾未闭合也可识别。' autocapitalize="none" spellcheck="false"></textarea>
+          <div class="quick-import-head"><span class="quick-import-title" id="quickImportTitle">粘贴站点配置</span><span class="hint">支持 baseURL + apiKey 与 NewAPI 通道连接导出（_type + url + key）；仅预填不保存。</span></div>
+          <textarea id="quickImportText" maxlength="20480" placeholder='可粘贴完整 JSON、包含 baseURL 与 apiKey 的片段，或 NewAPI 通道连接导出；末尾未闭合也可识别。' autocapitalize="none" spellcheck="false"></textarea>
           <div class="quick-import-actions">
             <button type="button" class="btn action sm" id="quickImportParse">识别并填入</button>
             <button type="button" class="btn ghost sm" id="quickImportOpenExisting" hidden>打开已有站点</button>
@@ -125,7 +125,7 @@
         </div>
         <div class="form-row">
           <label for="f_group">分组</label>
-          <input id="f_group" type="text" maxlength="80" placeholder="主力 / 备用 / 测试（可选）" autocomplete="off" />
+          <input id="f_group" type="text" maxlength="80" placeholder="备用 / 测试（可选）" autocomplete="off" />
         </div>
         <div class="form-row field-note">
           <label for="f_note">备注</label>
@@ -184,15 +184,15 @@
         </div>
         <div class="form-row setting-proxy">
           <label for="s_proxy">自定义请求代理（可选）</label>
-          <input id="s_proxy" type="text" placeholder="留空 = 自动选择直连或本地同源转发" />
-          <div class="hint" id="s_proxy_hint"></div>
+          <input id="s_proxy" type="text" placeholder="留空 = 浏览器优先直连，失败时自动尝试本地同源转发" />
+          <div class="hint">本地通过 server.mjs 打开时，会在浏览器跨域请求失败后自动使用同源转发；它不是系统“梯子”，不会影响 Google 等其它网页。此处仅用于覆盖自动策略，填入的代理会收到请求与 API Key，请只使用你信任的地址。</div>
         </div>
         <div class="form-row">
           <label for="s_concurrency">批量测试并发数</label>
           <input id="s_concurrency" type="number" min="1" max="20" value="5" />
         </div>
         <div class="form-row">
-          <label for="s_timeout">单测超时（秒）</label>
+          <label for="s_timeout">模型测试超时（秒）</label>
           <input id="s_timeout" type="number" min="3" max="120" value="15" />
         </div>
       </div>
