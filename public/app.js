@@ -1303,6 +1303,9 @@ async function readSseStream(response, onDelta){
       bytes += step.value ? step.value.length : 0;
       if(bytes > STREAM_PROBE_MAX_BYTES){ done = true; break; }
       buffer += decoder.decode(step.value, { stream:true });
+      // 兼容 CRLF 分行的上游：统一成 LF 再找空行边界，否则 \r\n\r\n 匹配不到事件分隔，
+      // 首字延迟要等整条流读完才量得出。对整个累积 buffer 替换，\r\n 跨分块也能归一。
+      buffer = buffer.replace(/\r\n/g, "\n");
       // SSE 事件以空行分隔；只取 data: 行，忽略注释与其它字段。
       let boundary;
       while((boundary = buffer.indexOf("\n\n")) !== -1){
