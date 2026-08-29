@@ -33,7 +33,7 @@ const MODEL_STATES = new Set(["idle","testing","ok","fail"]);
 // 模型响应达到此阈值仍视为成功，但在卡片上明确标为“延迟较高”。
 const MODEL_SLOW_LATENCY_MS = 800;
 // 日志只保留有限的摘要，既能排查请求又不会随批量测试无限增长。
-const REQUEST_LOG_MAX = 60;
+const REQUEST_LOG_MAX = 40;
 const REQUEST_LOG_TEXT_MAX = 500;
 const BALANCE_KINDS = new Set(["balance","quota"]);
 const MODEL_SORT_MODES = new Set(["source","available","latency"]);
@@ -41,11 +41,27 @@ const MODEL_SORT_MODES = new Set(["source","available","latency"]);
 // deep 额外验证工具调用、JSON 输出与长上下文（6 次，其中长上下文请求体最大）。
 const TEST_DEPTHS = new Set(["ping","basic","deep"]);
 const TEST_DEPTH_LABELS = Object.freeze({ ping:"连通", basic:"标准", deep:"深度" });
+// 档位说明直接写在工具栏下方的一行提示里：写清楚发什么请求、核验什么，用户不用猜。
+const TEST_DEPTH_HINTS = Object.freeze({
+  ping:"发 1 条最小对话请求：验证地址可达、鉴权有效、路由正确。",
+  basic:"先做连通，再核验 3 件事：回复身份与请求的模型一致（防中转偷换）、SSE 流式逐字返回、多轮对话记得上一轮内容。",
+  deep:"标准档全部项目，再加 3 项：按 JSON 格式输出并解析校验、返回工具调用（tool_calls）、用填充文本实测声明的长上下文。"
+});
 // 探针键必须与 runProbe 分支一一对应；持久化时按此白名单过滤，旧数据与导入备份不会带入未知项。
 const PROBE_KEYS = new Set(["chat","identity","stream","context","tools","json","long"]);
 const PROBE_LABELS = Object.freeze({
   chat:"指令遵循", identity:"模型一致", stream:"流式输出",
   context:"多轮上下文", tools:"工具调用", json:"JSON 输出", long:"长上下文"
+});
+// 每项探针的判据一句话说明，挂在逐项结果标签的悬浮提示上。
+const PROBE_HINTS = Object.freeze({
+  chat:"发固定口令指令，检查回复是否包含口令",
+  identity:"对比请求的模型与响应回显的 model 字段",
+  stream:"检查 SSE 增量是否逐字到达，统计首字延迟",
+  context:"第二轮要求复述第一轮的口令",
+  tools:"下发天气查询工具，检查是否返回 tool_calls",
+  json:"要求输出 JSON 并实际解析校验",
+  long:"塞入设定 KB 的填充文本后要求复述口令"
 });
 const PROBE_STATES = new Set(["pass","fail","skip"]);
 const CAPABILITY_GRADES = new Set(["usable","limited","unusable"]);
@@ -322,6 +338,7 @@ function normalizeStation(source){
     group: text(s.group,80) === "主力" ? "" : text(s.group,80),
     note: text(s.note,1000),
     balancePath: balancePath === null ? "" : balancePath,
+    headers: normalizeStationHeaders(s.headers),
     order: Number.isFinite(Number(s.order)) ? Number(s.order) : 0,
     // 状态对象：连通性、余额及其来源/单位、原始返回、最近测试时间/错误原因
     status: {
@@ -653,6 +670,8 @@ function isLogEntryLive(log, st){
   if(log.kind === "连通诊断") return st.status && st.status.connectivity === "testing";
   return false;
 }
+// 日志一行一条：状态着色 + 类型 + 结果摘要 + 延时 + 时间；方法/端点/通道放进悬浮提示，正文不再铺开。
+const LOG_KIND_SHORT={ "模型测试":"测试", "连通诊断":"连通", "余额查询":"余额", "模型列表":"列表" };
 function requestLogPanelMarkup(st){
   const logData=requestLogEntries(st);
   const entries=logData.entries;
@@ -660,20 +679,22 @@ function requestLogPanelMarkup(st){
     const live=isLogEntryLive(log, st);
     // 非 live 的 info 日志回落为中性默认样式（无 testing 琥珀色），只有进行中才着色并转圈。
     const cls=log.level === "error" ? "fail" : log.level === "warn" ? "warn" : log.level === "ok" ? "ok" : (live ? "testing" : "info");
-    const status=Number.isFinite(log.status) ? "HTTP "+log.status : "—";
-    const latency=Number.isFinite(log.latency) ? fmtLat(log.latency) : "—";
-    const transport=log.transport === "builtin" ? "本地转发" : log.transport === "custom" ? "自定义代理" : log.transport === "direct" ? "浏览器直连" : "—";
-    const subject=log.model ? ` · ${log.model}` : "";
-    return `<div class="request-log-entry ${cls}">
-      <div class="request-log-entry-head"><strong>${esc(log.kind || "请求")}${esc(subject)}</strong><time>${esc(fmtRequestTime(log.at))}</time></div>
-      <div class="request-log-entry-meta"><span>${esc(log.method || "—")} ${esc(log.endpoint || "—")}</span><span>${esc(status)}</span><span>${esc(latency)}</span><span>${esc(transport)}</span></div>
-      <div class="request-log-entry-text">${live?SPINNER_ICON:""}${esc(log.message || "请求完成")}</div>
+    const latency=Number.isFinite(log.latency) ? fmtLat(log.latency) : "";
+    const transport=log.transport === "builtin" ? "本地转发" : log.transport === "custom" ? "自定义代理" : log.transport === "direct" ? "浏览器直连" : "";
+    const status=Number.isFinite(log.status) ? "HTTP "+log.status : "";
+    const tip=[log.method && log.endpoint ? log.method+" "+log.endpoint : "", status, transport, log.message || ""].filter(Boolean).join(" · ");
+    const subject=log.model ? log.model+"：" : "";
+    return `<div class="request-log-entry ${cls}"${tip?` title="${esc(tip)}"`:""}>
+      <span class="lg-kind">${esc(LOG_KIND_SHORT[log.kind] || log.kind || "请求")}</span>
+      <span class="lg-text">${live?SPINNER_ICON:""}${esc(subject)}${esc(log.message || "请求完成")}</span>
+      ${latency?`<span class="lg-lat">${esc(latency)}</span>`:""}
+      <time>${esc(fmtRequestTime(log.at))}</time>
     </div>`;
   }).join("") : `<div class="request-log-empty">暂无请求记录</div>`;
   return `<section class="request-log-panel" aria-label="日志">
     <div class="request-log-head">
       <div class="request-log-heading"><span class="title">日志</span><span class="request-log-count">${logData.count ? logData.count+" 条" : "等待请求"}</span></div>
-      <span class="request-log-summary">仅保留最近 ${REQUEST_LOG_MAX} 条脱敏核心请求信息</span>
+      <span class="request-log-summary">延时 / 连通 / 失败原因 · 悬停看完整信息</span>
     </div>
     <div class="request-log-list">${logRows}</div>
   </section>`;
@@ -1144,31 +1165,81 @@ async function fetchWithTimeout(url, options={}, timeoutSeconds=settings.timeout
   const controller = new AbortController();
   const seconds=clampInt(timeoutSeconds, 1, 120, settings.timeout);
   const timer = setTimeout(()=>controller.abort(), seconds * 1000);
+  const relayFirst=options.aiHubRelayFirst === true;
+  const customHeaders=options.aiHubCustomHeaders && typeof options.aiHubCustomHeaders === "object" && Object.keys(options.aiHubCustomHeaders).length
+    ? options.aiHubCustomHeaders : null;
+  const baseOptions={ ...options };
+  delete baseOptions.aiHubRelayFirst;
+  delete baseOptions.aiHubCustomHeaders;
+  // 直连时自定义头随普通头发出；转走内置转发时改为控制头，由本地 Node 补写后发往上游，
+  // 避免把控制头本身泄漏给目标站点。
+  const relayOptions=()=>{
+    const opts={ ...baseOptions, signal:controller.signal };
+    if(customHeaders){
+      const plain={ ...(baseOptions.headers || {}) };
+      Object.keys(customHeaders).forEach(key=>{ delete plain[key]; });
+      opts.headers={ ...plain, "x-aihub-extra-headers":encodeExtraHeaders(customHeaders) };
+    }
+    return opts;
+  };
+  const startRelay=async()=>{
+    const response=await fetch(localProxyUrl(url), relayOptions());
+    if(response.headers.get("x-aihub-proxy") !== "1"){
+      try{ await response.body?.cancel(); }catch(e){}
+      localProxySupport=false;
+      localProxyLastCheckedAt=Date.now();
+      throw localRelayUnavailableError();
+    }
+    return response;
+  };
+  const startDirect=async()=>{
+    const opts={ ...baseOptions, signal:controller.signal };
+    if(customHeaders){
+      // 直连时尽力携带：受限头（如 User-Agent）可能被浏览器静默忽略，此时由转发路径兜底。
+      const plain={ ...(baseOptions.headers || {}) };
+      Object.assign(plain, customHeaders);
+      opts.headers=plain;
+    }
+    const response=await fetch(url, opts);
+    responseTransports.set(response,"direct");
+    return response;
+  };
   try{
     let response;
     let transport=settings.proxy ? "custom" : "direct";
-    try{
-      // 先走浏览器的原生网络路径（包括用户自己的系统代理/VPN）；绝不让本地 Node 先行接管。
-      response = await fetch(url, { ...options, signal:controller.signal });
-    }catch(directError){
-      if(controller.signal.aborted) throw new Error("请求超时");
-      const canUseLocalRelay=!settings.proxy && isCrossOriginHttpUrl(url) && isCorsLikeError(directError);
-      if(!canUseLocalRelay) throw directError;
-      if(!(await checkLocalProxy())) throw localRelayUnavailableError();
+    const canRelay=!settings.proxy && isCrossOriginHttpUrl(url);
+    if(relayFirst && canRelay && await checkLocalProxy()){
       try{
-        response=await fetch(localProxyUrl(url), { ...options, signal:controller.signal });
+        const relayResponse=await startRelay();
+        // 本地转发只放行公网地址；中转自身拒绝（如内网目标）时回退直连，让本机/内网网关继续可用。
+        if(relayResponse.headers.get("x-aihub-proxy-error") === "blocked_target"){
+          try{ await relayResponse.body?.cancel(); }catch(e){}
+          finishResponse(relayResponse);
+        }else{
+          responseTransports.set(relayResponse,"builtin");
+          response=relayResponse;
+          transport="builtin";
+        }
       }catch(relayError){
         if(controller.signal.aborted) throw new Error("请求超时");
-        throw localRelayUnavailableError();
+        // 转发不可用不直接失败：自定义头可能被浏览器忽略，但直连仍有机会完成任务。
+        response=null;
       }
-      // 带签名的 4xx/5xx 是目标或中转的真实结果，必须交给调用方展示；不能再直连覆盖它。
-      if(response.headers.get("x-aihub-proxy") !== "1"){
-        try{ await response.body?.cancel(); }catch(e){}
-        localProxySupport=false;
-        localProxyLastCheckedAt=Date.now();
-        throw localRelayUnavailableError();
+    }
+    if(!response){
+      try{
+        // 先走浏览器的原生网络路径（包括用户自己的系统代理/VPN）；绝不让本地 Node 先行接管。
+        response=await startDirect();
+      }catch(directError){
+        if(controller.signal.aborted) throw new Error("请求超时");
+        const canUseLocalRelay=!settings.proxy && isCrossOriginHttpUrl(url) && isCorsLikeError(directError);
+        if(!canUseLocalRelay) throw directError;
+        if(!(await checkLocalProxy())) throw localRelayUnavailableError();
+        // startRelay 内部已校验转发签名；未签名或异常都按转发不可用处理。
+        response=await startRelay();
+        responseTransports.set(response,"builtin");
       }
-      transport="builtin";
+      transport=responseTransports.get(response) || transport;
     }
     responseTransports.set(response,transport);
     responseTimeouts.set(response, { controller, timer });
@@ -1292,6 +1363,50 @@ async function discardResponse(response){
   try{ await response.body?.cancel(); }catch(e){}
   finishResponse(response);
 }
+// 站点级自定义请求头：跟随该站点的每个 API 请求发送（如某些中转站要求特定 User-Agent）。
+// 传输控制头一律拒收——它们由浏览器/本地转发自己管理，用户写进来只会造成请求损坏。
+const STATION_HEADER_NAME_RE=/^[A-Za-z0-9-]{1,64}$/;
+const STATION_HEADER_DENY=new Set(["host","content-length","content-encoding","accept-encoding","connection","keep-alive","transfer-encoding","upgrade","te","trailer","expect","proxy-connection","x-aihub-extra-headers"]);
+const STATION_HEADER_MAX=8;
+function normalizeStationHeaders(source){
+  if(!source || typeof source !== "object" || Array.isArray(source)) return {};
+  const out={};
+  for(const [name,value] of Object.entries(source)){
+    if(!STATION_HEADER_NAME_RE.test(name) || STATION_HEADER_DENY.has(name.toLowerCase())) continue;
+    if(typeof value !== "string" || !value || value.length > 512 || /[\r\n\0]/.test(value)) continue;
+    out[name]=value;
+    if(Object.keys(out).length >= STATION_HEADER_MAX) break;
+  }
+  return out;
+}
+function parseStationHeadersText(raw){
+  const trimmed=String(raw || "").trim();
+  if(!trimmed) return { headers:{} };
+  let parsed;
+  try{ parsed=JSON.parse(trimmed); }
+  catch(e){ return { error:"自定义请求头必须是合法 JSON，例如 {\"User-Agent\":\"claude-cli/2.0.0 (external, cli)\"}" }; }
+  if(!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { error:"自定义请求头必须是 JSON 对象：键为头名，值为字符串" };
+  const headers=normalizeStationHeaders(parsed);
+  if(Object.keys(headers).length !== Object.keys(parsed).filter(key=>parsed[key] != null && parsed[key] !== "").length){
+    return { error:"存在不支持的头：禁止 host/content-length 等传输控制头；值为非空字符串且 ≤ 512 字符，最多 8 个" };
+  }
+  return { headers };
+}
+function hasCustomHeaders(st){ return !!st && !!st.headers && Object.keys(st.headers).length > 0; }
+function stationHeadersText(st){ return hasCustomHeaders(st) ? JSON.stringify(st.headers) : ""; }
+// 内置转发收到的自定义头经 base64url(JSON) 控制头补写；浏览器直连时随普通头发出（受限头可能被浏览器忽略）。
+function encodeExtraHeaders(obj){
+  const bytes=new TextEncoder().encode(JSON.stringify(obj));
+  let binary="";
+  bytes.forEach(b=>{ binary+=String.fromCharCode(b); });
+  return btoa(binary).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+}
+// 配了自定义头的站点优先走本地转发：User-Agent 等受限头只有服务端转发才能保证写到上游。
+function stationRelayOptions(st){
+  return hasCustomHeaders(st)
+    ? { aiHubRelayFirst:true, aiHubCustomHeaders:{ ...st.headers } }
+    : {};
+}
 function stationAuthHeaders(st, mode, originalHeaders={}){
   const headers={ ...originalHeaders };
   Object.keys(headers).forEach(key=>{
@@ -1299,6 +1414,8 @@ function stationAuthHeaders(st, mode, originalHeaders={}){
   });
   if(mode === "x-api-key") headers["x-api-key"]=st.apikey;
   else headers.Authorization="Bearer "+st.apikey;
+  // 自定义头最后合并：同名覆盖默认鉴权头是站点配置的明确意图。
+  if(st && st.headers) Object.assign(headers, st.headers);
   return headers;
 }
 // OpenAI 兼容通常是 Bearer，但一部分 Sub2API/New API 衍生网关仅接受 x-api-key。
@@ -1310,7 +1427,7 @@ async function fetchStationApi(st, url, options={}, timeoutSeconds=settings.time
   const method=String(requestOptions.method || "GET").toUpperCase();
   // GET/HEAD 可安全地切换认证头；POST 等请求可能产生计费或副作用，禁止自动重发。
   const allowAuthRetry=requestedAuthRetry === true || (requestedAuthRetry !== false && ["GET","HEAD"].includes(method));
-  const request=mode=>fetchWithTimeout(url,{ ...requestOptions, headers:stationAuthHeaders(st,mode,requestOptions.headers || {}) },timeoutSeconds);
+  const request=mode=>fetchWithTimeout(url,{ ...requestOptions, ...stationRelayOptions(st), headers:stationAuthHeaders(st,mode,requestOptions.headers || {}) },timeoutSeconds);
   let response=await request(preferred);
   if(response.ok){
     if(st && st.status) st.status.authMode=preferred;
@@ -1404,7 +1521,8 @@ function testConnectivity(id){
           try{
             response=await fetchWithTimeout(candidate.url, {
               method:"GET",
-              headers:mode ? connectivityHeaders(st,mode) : {}
+              headers:mode ? connectivityHeaders(st,mode) : {},
+              ...stationRelayOptions(st)
             });
             if(!isCurrentStation(id, revision)){ finishResponse(response); return { ok:false, stale:true }; }
               if(response.ok){
@@ -1714,7 +1832,7 @@ async function fetchNewApiStatus(st, revision){
   let response;
   try{
     // 仅用于正确显示 New API 配额单位，失败不影响已拿到的余额；最多等待 5 秒。
-    response=await fetchWithTimeout(buildUrl(rootApiUrl(st.baseurl,"/api/status")), {}, Math.min(settings.timeout,5));
+    response=await fetchWithTimeout(buildUrl(rootApiUrl(st.baseurl,"/api/status")), { ...stationRelayOptions(st) }, Math.min(settings.timeout,5));
     if(!isCurrentStation(st.id, revision)){ finishResponse(response); return null; }
     if(!response.ok){ finishResponse(response); return null; }
     return await responseData(response);
@@ -2097,7 +2215,6 @@ async function testModel(id, modelId, revision=stationRevision(id), options={}){
       return false;
     }
     model.test = "testing"; model.latency = null; model.err = null; model.lastRequestAt=Date.now();
-    appendRequestLog(st,{ level:"info", kind:"模型测试", method:"POST", endpoint:"/v1/chat/completions", model:modelId, message:(TEST_DEPTH_LABELS[depth]||depth)+"档测试开始" });
     persistModelProgress(id, revision);
     started = performance.now();
     const capability = await runCapabilitySuite(st, modelId, depth, ()=>isCurrentStation(id, revision));
@@ -3121,7 +3238,8 @@ function detailHTML(st, isFocus){
       const mark=probe.state==="pass" ? "✓" : probe.state==="fail" ? "✕" : "–";
       const word=probe.state==="pass" ? "通过" : probe.state==="fail" ? "未通过" : "跳过";
       const detail=probe.detail ? "：" + probe.detail : "";
-      return `<span class="probe ${probe.state}" title="${esc(label+" "+word+detail)}" aria-label="${esc(label+" "+word+detail)}">${esc(label)}<b>${mark}</b></span>`;
+      const hint=PROBE_HINTS[probe.key] ? "（"+PROBE_HINTS[probe.key]+"）" : "";
+      return `<span class="probe ${probe.state}" title="${esc(label+hint+" "+word+detail)}" aria-label="${esc(label+" "+word)}">${esc(label)}<b>${mark}</b></span>`;
     }).join("")}</div>` : "";
     return `
       <div class="model model-state-${visualState} ${selected?"selected":""}" data-model-id="${esc(m.id)}">
@@ -3168,6 +3286,7 @@ function detailHTML(st, isFocus){
           </div>
         </div>
       </div>
+      <div class="depth-hint">${esc(TEST_DEPTH_HINTS[settings.testDepth] || "")}</div>
       ${st.status.modelListError?`<div class="models-error">最近获取失败：${esc(st.status.modelListError)}</div>`:""}
       <div class="models" id="dwModels">${modelsHtml}</div>
       ${requestLogPanelMarkup(st)}
@@ -3178,6 +3297,7 @@ function detailHTML(st, isFocus){
       <div class="connection-grid">
         <div class="field"><label>Base URL</label><div class="val"><span class="txt">${esc(st.baseurl)}</span><button type="button" data-copy="${esc(st.baseurl)}" title="复制 Base URL" aria-label="复制 Base URL">${COPY_ICON}</button></div></div>
         <div class="field"><label>API Key</label><div class="val">${apiKeyControlsMarkup(st,{detail:true,displayId:"dwKey",toggleId:"dwKeyToggle"})}</div></div>
+        ${hasCustomHeaders(st)?`<div class="field wide" title="${esc(JSON.stringify(st.headers))}"><label>自定义请求头</label><div class="val"><span class="txt">${esc(Object.keys(st.headers).join("、"))}（在「编辑 → 高级选项」中修改）</span></div></div>`:""}
         ${st.group?`<div class="field"><label>分组</label><div class="val"><span class="txt">${esc(st.group)}</span></div></div>`:""}
         ${st.note?`<div class="field wide"><label>备注</label><div class="val"><span class="txt">${esc(st.note)}</span></div></div>`:""}
       </div>
@@ -3397,7 +3517,8 @@ function openForm(id, options={}){
   document.getElementById("f_group").value = st?st.group:"";
   document.getElementById("f_note").value = st?st.note:"";
   document.getElementById("f_balancePath").value = st?st.balancePath:"";
-  const hasAdvanced = !!(st && st.balancePath);
+  document.getElementById("f_headers").value = st?stationHeadersText(st):"";
+  const hasAdvanced = !!(st && (st.balancePath || hasCustomHeaders(st)));
   document.getElementById("advBox").style.display = hasAdvanced ? "block" : "none";
   document.getElementById("advToggle").textContent = (hasAdvanced ? "▾ " : "▸ ") + "高级选项";
   document.getElementById("advToggle").setAttribute("aria-expanded", String(hasAdvanced));
@@ -3428,6 +3549,9 @@ function saveForm(){
   const note = text(document.getElementById("f_note").value,1000);
   const rawBalancePath = document.getElementById("f_balancePath").value;
   const balancePath = normalizeBalancePath(rawBalancePath);
+  const parsedHeaders=parseStationHeadersText(document.getElementById("f_headers").value);
+  if(parsedHeaders.error){ toast(parsedHeaders.error,"warn"); return; }
+  const customHeaders=parsedHeaders.headers;
   if(!name || !text(rawBaseurl) || !apikey){ toast("名称、Base URL、API Key 均为必填","warn"); return; }
   if(!baseurl){ toast("请输入有效的 http(s) Base URL","warn"); return; }
   if(balancePath === null){ toast("余额接口路径只能是站内相对路径","warn"); return; }
@@ -3443,12 +3567,19 @@ function saveForm(){
     const st = getById(editingId);
     if(!st){ hideModal("formModal"); return; }
     const connectionChanged = st.baseurl !== baseurl || st.apikey !== apikey;
+    const headersChanged = JSON.stringify(st.headers || {}) !== JSON.stringify(customHeaders);
     const balancePathChanged = st.balancePath !== balancePath;
     // 持久化失败时需要把单站状态还原到 Object.assign 之前，避免内存与磁盘脱节却谎报成功。
     const stationSnapshot=JSON.stringify(st);
-    Object.assign(st, { name, baseurl, apikey, group, note, balancePath });
+    Object.assign(st, { name, baseurl, apikey, group, note, balancePath, headers:customHeaders });
     // 更换服务地址或密钥后，旧连通性/余额/模型测试均不再可信；让迟到请求失效。
     if(connectionChanged){ revealedApiKeyIds.delete(st.id); invalidateStation(st.id); resetStationRuntime(st); selectedModelsByStation.delete(st.id); if((focusId || selectedId)===st.id) selectedModels.clear(); }
+    else if(headersChanged){
+      // 只改了请求头：旧的连通性结论不可信，让在途请求失效并复位连通状态；
+      // 模型列表与测试结果仍有效，用户可一键复测，不必重新拉取。
+      invalidateStation(st.id);
+      st.status.connectivity="unknown"; st.status.latency=null; st.status.error=null; st.status.transport=null;
+    }
     else if(balancePathChanged){
       // 自定义余额路径变更时同样使未完成请求失效，防止旧路径的响应回写新配置。
       invalidateStation(st.id);
@@ -3466,7 +3597,7 @@ function saveForm(){
   } else {
     const stationsSnapshot=JSON.stringify(stations);
     const maxOrder = stations.reduce((m,s)=>Math.max(m, s.order), -1);
-    stations.push(normalizeStation({ id:uid(), name, baseurl, apikey, group, note, balancePath, order:maxOrder+1 }));
+    stations.push(normalizeStation({ id:uid(), name, baseurl, apikey, group, note, balancePath, headers:customHeaders, order:maxOrder+1 }));
     persisted=save();
     if(!persisted){
       stations=JSON.parse(stationsSnapshot);   // 弹出刚 push 的站点，内存与磁盘保持一致

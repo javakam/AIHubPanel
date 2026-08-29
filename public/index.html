@@ -13,7 +13,7 @@
     <div class="brand">
       <div class="brand-line">
         <h1>AIHubPanel</h1>
-        <span class="version-badge" title="AIHubPanel 当前版本" aria-label="当前版本 v8">v8</span>
+        <span class="version-badge" title="AIHubPanel 当前版本" aria-label="当前版本 v9">v9</span>
         <div class="title-stats" id="titleStats"></div>
       </div>
       <span class="sub">中转站管理 · 轻量面板</span>
@@ -136,6 +136,9 @@
           <label for="f_balancePath">余额接口路径（留空自动适配）</label>
           <input id="f_balancePath" type="text" maxlength="1024" placeholder="留空：自动识别常见中转站" autocapitalize="none" spellcheck="false" />
           <div class="hint">留空依次适配 OpenAI 兼容、New API 与 Sub2API；填写后仅请求此站内相对路径。</div>
+          <label for="f_headers">自定义请求头（JSON，可选）</label>
+          <textarea id="f_headers" maxlength="2048" placeholder='{"User-Agent": "claude-cli/2.0.0 (external, cli)"}' autocapitalize="none" spellcheck="false"></textarea>
+          <div class="hint">写入该站点每个请求；配置后自动优先走本地转发，User-Agent 等浏览器不允许伪造的头只有在转发下才保证生效。</div>
         </div>
       </div>
       <footer>

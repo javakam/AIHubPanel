@@ -429,19 +429,18 @@
   .request-log-heading .title{font-size:14px; color:var(--tx); font-weight:800}
   .request-log-count{color:var(--pri-tx); font-size:12.5px; font-weight:800}
   .request-log-summary{min-width:0; overflow:hidden; color:var(--tx); font-size:13px; font-weight:650; line-height:1.4; text-overflow:ellipsis; white-space:nowrap}
-  .request-log-list{display:grid; gap:7px; max-height:210px; overflow:auto; scrollbar-gutter:stable; padding:10px 12px 12px; border-top:1px solid var(--bd)}
-  .request-log-entry{min-width:0; padding:8px 10px; border-left:3px solid var(--pri); border-radius:0 8px 8px 0; background:var(--sf)}
+  .request-log-list{display:grid; gap:3px; max-height:210px; overflow:auto; scrollbar-gutter:stable; padding:8px 10px 10px; border-top:1px solid var(--bd)}
+  .request-log-entry{display:flex; align-items:baseline; gap:8px; min-width:0; padding:4px 8px; border-left:3px solid var(--pri); border-radius:0 6px 6px 0; background:var(--sf)}
   .request-log-entry.ok{border-left-color:var(--ok)}
   .request-log-entry.fail{border-left-color:var(--err)}
   .request-log-entry.testing{border-left-color:var(--warn)}
-  .request-log-entry-head{display:flex; align-items:baseline; justify-content:space-between; gap:10px; min-width:0}
-  .request-log-entry-head strong{min-width:0; overflow:hidden; color:var(--tx); font-size:13px; font-weight:800; text-overflow:ellipsis; white-space:nowrap}
-  .request-log-entry-head time{flex:0 0 auto; color:var(--tx); font-family:var(--mono); font-size:12px; font-weight:700}
-  .request-log-entry-text{margin-top:3px; overflow-wrap:anywhere; color:var(--tx); font-size:13px; font-weight:650; line-height:1.5}
-  .request-log-entry.ok .request-log-entry-text{color:var(--ok)}
-  .request-log-entry.fail .request-log-entry-text{color:var(--err)}
-  .request-log-entry.testing .request-log-entry-text{color:var(--warn)}
-  .request-log-entry-text .spin{width:13px; height:13px; margin:1px 4px 0 0; vertical-align:top}
+  .request-log-entry .lg-kind{flex:0 0 auto; color:var(--dim2); font-size:11px; font-weight:800; letter-spacing:.04em}
+  .request-log-entry .lg-text{flex:1 1 auto; min-width:0; overflow:hidden; color:var(--tx); font-size:12.5px; font-weight:650; line-height:1.45; text-overflow:ellipsis; white-space:nowrap}
+  .request-log-entry.ok .lg-text{color:var(--ok)}
+  .request-log-entry.fail .lg-text{color:var(--err)}
+  .request-log-entry .lg-text .spin{width:12px; height:12px; margin-right:4px; vertical-align:-1px}
+  .request-log-entry .lg-lat{flex:0 0 auto; color:var(--dim2); font-family:var(--mono); font-size:11.5px; font-weight:800}
+  .request-log-entry time{flex:0 0 auto; color:var(--dim2); font-family:var(--mono); font-size:11px; font-weight:700}
   .request-log-empty{padding:5px 0; color:var(--tx); font-size:13px; font-weight:650}
 
   /* 模型状态采用稳定的内嵌色带，不改变卡片尺寸，批测过程中 Grid 不会跳动。 */
@@ -461,11 +460,9 @@
   .request-log-panel{background:var(--sf2);}
   .request-log-head{grid-template-columns:auto minmax(0,1fr);}
   .request-log-summary{font-size:12px; color:var(--dim); text-align:right;}
-  .request-log-list{max-height:310px; min-height:72px;}
-  .request-log-entry-meta{display:flex; flex-wrap:wrap; align-items:center; gap:6px 12px; margin-top:5px; color:var(--dim); font:700 11.5px/1.35 var(--mono); overflow-wrap:anywhere}
-  .request-log-entry-meta span{min-width:0;}
+  .request-log-list{max-height:280px; min-height:52px;}
   .request-log-entry.warn{border-left-color:var(--warn)}
-  .request-log-entry.warn .request-log-entry-text{color:var(--warn)}
+  .request-log-entry.warn .lg-text{color:var(--warn)}
 
   /* 中等桌面保留三列；宽屏四列，模型名仍按单元格宽度自然换行。 */
   @media (min-width:900px){
@@ -799,39 +796,39 @@
   /* ---------- C 融合：站点列表 ----------
      只作用于左侧列表，沿用现有数据与操作逻辑；详情/网格仍使用原有布局。 */
   .list-pane{
-    flex-basis:400px; max-width:42vw; padding:10px; gap:12px;
+    flex-basis:330px; max-width:42vw; padding:8px; gap:8px;
     background:var(--sf); border-color:var(--bd); border-radius:16px;
     box-shadow:var(--shadow-sm);
   }
-  .list-pane .pane-head{padding:4px 6px 2px}
-  .list-pane .pane-eyebrow{color:var(--pri-tx); font-size:13px; font-weight:800; letter-spacing:.1em; text-transform:uppercase}
-  .list-pane .pane-head strong{font-size:16px; font-weight:760}
+  .list-pane .pane-head{padding:2px 6px 0}
+  .list-pane .pane-eyebrow{color:var(--pri-tx); font-size:12px; font-weight:800; letter-spacing:.1em; text-transform:uppercase}
+  .list-pane .pane-head strong{font-size:15px; font-weight:760}
   .list-pane .pane-count{color:var(--pri-tx); background:var(--pri-soft); border-color:var(--bd)}
   .list-pane .row-item{
-    position:relative; display:flex; flex-direction:column; align-items:stretch; gap:10px;
-    min-width:0; padding:14px; border:1px solid var(--bd); border-radius:11px;
-    background:var(--sf); box-shadow:0 18px 50px rgba(0,0,0,.26); flex-wrap:nowrap;
+    position:relative; display:flex; flex-direction:column; align-items:stretch; gap:6px;
+    min-width:0; padding:9px 10px; border:1px solid var(--bd); border-radius:10px;
+    background:var(--sf); box-shadow:0 6px 16px rgba(0,0,0,.18); flex-wrap:nowrap;
     transition:background .18s,border-color .18s,box-shadow .18s;
   }
   .list-pane .row-item:hover{border-color:var(--bd2); background:var(--row-hover)}
-  .list-pane .row-item.selected{border-color:color-mix(in srgb,var(--pri) 40%,transparent); background:var(--pri-soft); box-shadow:inset 2px 0 0 var(--pri),0 18px 50px rgba(0,0,0,.26)}
-  .list-pane .row-item.online{box-shadow:inset 2px 0 0 var(--ok),0 18px 50px rgba(0,0,0,.26)}
-  .list-pane .row-item.reachable{box-shadow:inset 2px 0 0 var(--ok),0 18px 50px rgba(0,0,0,.26)}
-  .list-pane .row-item.offline{box-shadow:inset 2px 0 0 var(--err),0 18px 50px rgba(0,0,0,.26)}
-  .list-pane .row-item.testing{box-shadow:inset 2px 0 0 var(--warn),0 18px 50px rgba(0,0,0,.26)}
-  .list-pane .row-item.selected.online{box-shadow:inset 2px 0 0 var(--ok),inset 2px 0 0 var(--pri),0 18px 50px rgba(0,0,0,.26)}
-  .list-pane .row-item.selected.reachable{box-shadow:inset 2px 0 0 var(--ok),inset 2px 0 0 var(--pri),0 18px 50px rgba(0,0,0,.26)}
-  .list-pane .row-item.selected.offline{box-shadow:inset 2px 0 0 var(--err),inset 2px 0 0 var(--pri),0 18px 50px rgba(0,0,0,.26)}
-  .list-pane .row-item.selected.testing{box-shadow:inset 2px 0 0 var(--warn),inset 2px 0 0 var(--pri),0 18px 50px rgba(0,0,0,.26)}
-  .list-pane .row-top{display:flex; align-items:flex-start; justify-content:space-between; gap:10px; min-width:0}
-  .list-pane .row-top > .handle{margin-top:4px; flex:0 0 auto}
-  .list-pane .row-name{display:flex; align-items:baseline; gap:6px; min-width:0; flex:1 1 auto; font-size:15px; font-weight:700}
+  .list-pane .row-item.selected{border-color:color-mix(in srgb,var(--pri) 40%,transparent); background:var(--pri-soft); box-shadow:inset 2px 0 0 var(--pri),0 6px 16px rgba(0,0,0,.18)}
+  .list-pane .row-item.online{box-shadow:inset 2px 0 0 var(--ok),0 6px 16px rgba(0,0,0,.18)}
+  .list-pane .row-item.reachable{box-shadow:inset 2px 0 0 var(--ok),0 6px 16px rgba(0,0,0,.18)}
+  .list-pane .row-item.offline{box-shadow:inset 2px 0 0 var(--err),0 6px 16px rgba(0,0,0,.18)}
+  .list-pane .row-item.testing{box-shadow:inset 2px 0 0 var(--warn),0 6px 16px rgba(0,0,0,.18)}
+  .list-pane .row-item.selected.online{box-shadow:inset 2px 0 0 var(--ok),inset 2px 0 0 var(--pri),0 6px 16px rgba(0,0,0,.18)}
+  .list-pane .row-item.selected.reachable{box-shadow:inset 2px 0 0 var(--ok),inset 2px 0 0 var(--pri),0 6px 16px rgba(0,0,0,.18)}
+  .list-pane .row-item.selected.offline{box-shadow:inset 2px 0 0 var(--err),inset 2px 0 0 var(--pri),0 6px 16px rgba(0,0,0,.18)}
+  .list-pane .row-item.selected.testing{box-shadow:inset 2px 0 0 var(--warn),inset 2px 0 0 var(--pri),0 6px 16px rgba(0,0,0,.18)}
+  .list-pane .row-top{display:flex; align-items:flex-start; justify-content:space-between; gap:8px; min-width:0}
+  .list-pane .row-top > .handle{margin-top:2px; flex:0 0 auto}
+  .list-pane .row-name{display:flex; align-items:baseline; gap:6px; min-width:0; flex:1 1 auto; font-size:14px; font-weight:700}
   .list-pane .row-name .station-open{min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:inherit; font-weight:inherit}
   .list-pane .row-name .station-open:hover{color:var(--pri-tx); text-decoration:underline}
-  .list-pane .row-group{min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--pri-tx); font-size:13px; font-weight:700}
+  .list-pane .row-group{min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--pri-tx); font-size:12px; font-weight:700}
   .list-pane .row-actions{display:flex; align-items:center; gap:4px; flex:0 0 auto; margin-left:auto}
   .list-pane .row-actions .station-manage .btn{
-    width:28px; height:28px; padding:0; display:inline-grid; place-items:center; justify-content:center;
+    width:26px; height:26px; padding:0; display:inline-grid; place-items:center; justify-content:center;
     border:1px solid transparent; border-radius:7px; background:transparent; color:var(--dim2);
   }
   .list-pane .row-actions .station-manage{display:inline-flex; align-items:center; gap:3px; padding:0; border:0; background:transparent}
@@ -844,46 +841,46 @@
   .list-pane .row-actions .btn:disabled{opacity:.4; cursor:default}
   .list-pane .row-metrics{display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:0; min-width:0; overflow:hidden; border:1px solid var(--bd); border-radius:11px; background:var(--sf2)}
   .list-pane .row-metric{
-    display:flex; flex-direction:column; align-items:flex-start; justify-content:center; gap:3px; min-width:0; min-height:60px; padding:8px 10px;
+    display:flex; flex-direction:column; align-items:flex-start; justify-content:center; gap:1px; min-width:0; min-height:42px; padding:5px 9px;
     border:0; border-right:1px solid var(--bd); border-radius:0; background:transparent; text-align:left;
   }
   .list-pane .row-metric:last-child{border-right:0}
-  .list-pane .row-metric .m-label{display:block; min-height:16px; color:var(--dim2); font-size:13px; font-weight:800; letter-spacing:.03em; line-height:16px; text-transform:uppercase}
-  .list-pane .row-metric .m-val{display:block; min-width:0; min-height:18px; overflow:hidden; color:var(--tx); font-family:var(--font); font-size:14px; font-weight:760; font-variant-numeric:tabular-nums; letter-spacing:0; line-height:18px; text-overflow:ellipsis; white-space:nowrap}
+  .list-pane .row-metric .m-label{display:block; min-height:14px; color:var(--dim2); font-size:11px; font-weight:800; letter-spacing:.03em; line-height:14px; text-transform:uppercase}
+  .list-pane .row-metric .m-val{display:block; min-width:0; min-height:17px; overflow:hidden; color:var(--tx); font-family:var(--font); font-size:13px; font-weight:760; font-variant-numeric:tabular-nums; letter-spacing:0; line-height:17px; text-overflow:ellipsis; white-space:nowrap}
   .list-pane .row-metric .m-val.pri{color:var(--pri-tx)}
   .list-pane .row-metric .m-val.good{color:var(--ok)}
   .list-pane .row-metric .m-val.mid{color:var(--warn)}
   .list-pane .row-metric .m-val.bad{color:var(--err)}
   .list-pane .row-metric .m-val.na{color:var(--tx)}
-  .list-pane .row-metric.status{align-items:stretch; cursor:default; padding:8px 10px; border-color:var(--bd); background:transparent; color:inherit; font:inherit}
+  .list-pane .row-metric.status{align-items:stretch; cursor:default; padding:5px 9px; border-color:var(--bd); background:transparent; color:inherit; font:inherit}
   .list-pane .row-metric.status:hover{background:var(--row-hover)}
-  .list-pane .row-actions .status-refresh{width:30px; height:30px; flex:0 0 30px; display:inline-grid; place-items:center; padding:0; border:1px solid transparent; border-radius:8px; background:transparent; color:var(--tx); cursor:pointer; transition:color .16s,background .16s,border-color .16s}
-  .list-pane .row-actions .status-refresh svg{width:17px; height:17px; display:block; stroke-width:2.2}
-  .list-pane .row-actions .status-refresh .spin{width:16px; height:16px; animation:rot 1s linear infinite}
+  .list-pane .row-actions .status-refresh{width:26px; height:26px; flex:0 0 26px; display:inline-grid; place-items:center; padding:0; border:1px solid transparent; border-radius:8px; background:transparent; color:var(--tx); cursor:pointer; transition:color .16s,background .16s,border-color .16s}
+  .list-pane .row-actions .status-refresh svg{width:15px; height:15px; display:block; stroke-width:2.2}
+  .list-pane .row-actions .status-refresh .spin{width:14px; height:14px; animation:rot 1s linear infinite}
   .list-pane .row-actions .status-refresh:hover:not(:disabled),.list-pane .row-actions .status-refresh:focus-visible{color:var(--tx); background:var(--btn-hover); border-color:var(--bd2)}
   .list-pane .row-actions .status-refresh:disabled{opacity:.55; cursor:not-allowed}
   .list-pane .row-metric.status.online .m-val,.list-pane .row-actions .status-refresh.online,.list-pane .row-metric.status.reachable .m-val,.list-pane .row-actions .status-refresh.reachable{color:var(--ok)}
   .list-pane .row-metric.status.offline .m-val,.list-pane .row-actions .status-refresh.offline{color:var(--err)}
   .list-pane .row-metric.status.testing .m-val,.list-pane .row-actions .status-refresh.testing{color:var(--warn)}
   .list-pane .row-metric.status.unknown .m-val{color:var(--tx)}
-  .list-pane .row-url{position:relative; align-self:flex-start; max-width:100%; min-width:0; padding:2px 0; color:var(--pri-tx); font-size:15px; font-weight:700; line-height:21px; text-decoration:none; cursor:pointer}
+  .list-pane .row-url{position:relative; align-self:flex-start; max-width:100%; min-width:0; padding:1px 0; color:var(--pri-tx); font-size:13px; font-weight:700; line-height:18px; text-decoration:none; cursor:pointer}
   .list-pane .row-url .url-text{display:inline-block; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:bottom}
   .list-pane .row-url::after{content:""; position:absolute; left:0; right:0; bottom:-1px; height:1.5px; background:currentColor; opacity:.6; transform:scaleX(0); transform-origin:left center; transition:transform .25s ease}
   .list-pane .row-url:hover{color:var(--tx)}
   .list-pane .row-url:hover::after{transform:scaleX(1)}
   .list-pane .row-key{display:flex; align-items:center; min-width:0; padding:0; border:0; background:transparent; overflow:visible}
-  .list-pane .list-api-key{display:flex; align-items:center; gap:4px; width:100%; min-width:0; min-height:40px; padding:4px 5px 4px 10px; border:1px solid var(--bd); border-radius:10px; background:var(--sf2)}
-  .list-pane .list-api-key .key-box{display:flex; align-items:center; flex:1 1 auto; min-width:0; height:30px; overflow:hidden; padding:0; border:0; border-radius:0; background:transparent; scrollbar-width:thin}
-  .list-pane .list-api-key .key-secret{display:block; min-width:0; margin:0; color:var(--tx); font-family:var(--mono); font-size:12.5px; line-height:1.35; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; overflow-wrap:normal; word-break:normal}
-  .list-pane .list-api-key.is-empty .key-secret{color:var(--dim2); font-family:var(--font); font-size:13px}
+  .list-pane .list-api-key{display:flex; align-items:center; gap:4px; width:100%; min-width:0; min-height:32px; padding:3px 4px 3px 8px; border:1px solid var(--bd); border-radius:9px; background:var(--sf2)}
+  .list-pane .list-api-key .key-box{display:flex; align-items:center; flex:1 1 auto; min-width:0; height:25px; overflow:hidden; padding:0; border:0; border-radius:0; background:transparent; scrollbar-width:thin}
+  .list-pane .list-api-key .key-secret{display:block; min-width:0; margin:0; color:var(--tx); font-family:var(--mono); font-size:12px; line-height:1.35; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; overflow-wrap:normal; word-break:normal}
+  .list-pane .list-api-key.is-empty .key-secret{color:var(--dim2); font-family:var(--font); font-size:12.5px}
   /* 列表 Key 区固定高度；全文只在自身轨道横向查看，显隐不得推动卡片布局。 */
   .list-pane .list-api-key.is-revealed{align-items:center}
-  .list-pane .list-api-key.is-revealed .key-box{height:30px; min-height:30px; align-items:center; overflow:hidden; padding:0; scrollbar-width:none}
+  .list-pane .list-api-key.is-revealed .key-box{height:25px; min-height:25px; align-items:center; overflow:hidden; padding:0; scrollbar-width:none}
   .list-pane .list-api-key.is-revealed .key-box::-webkit-scrollbar{display:none}
   .list-pane .list-api-key.is-revealed .key-secret{overflow-x:auto; overflow-y:hidden; text-overflow:clip; white-space:nowrap; overflow-wrap:normal; word-break:normal; scrollbar-width:none}
   .list-pane .list-api-key.is-revealed .key-secret::-webkit-scrollbar{display:none}
   .list-pane .list-api-key .key-actions{display:flex; gap:3px; flex:0 0 auto}
-  .list-pane .list-api-key .key-action{width:30px; height:30px; padding:0; display:inline-grid; place-items:center; border:1px solid transparent; border-radius:7px; color:var(--dim2)}
+  .list-pane .list-api-key .key-action{width:26px; height:26px; padding:0; display:inline-grid; place-items:center; border:1px solid transparent; border-radius:7px; color:var(--dim2)}
   .list-pane .list-api-key .key-action:hover:not(:disabled){color:var(--tx); background:var(--btn-hover); border-color:var(--bd2)}
   .list-pane .list-api-key .key-action[aria-pressed="true"]{color:var(--pri-tx); background:var(--pri-soft); border-color:color-mix(in srgb,var(--pri) 30%,transparent)}
   .list-pane .list-api-key .key-action:disabled{opacity:.45; cursor:default}
@@ -973,3 +970,8 @@
   /* 跳过态靠「–」这个标记本身区分，不再压 opacity：
      压到能看出差别的程度（.62 实测 3.4:1、.82 浅色下 3.8:1）就已经低于正文 4.5:1 的门槛。 */
   .m-probes .probe.skip b{color:var(--dim2)}
+
+  /* ---------- 档位说明行 ----------
+     测试档位（连通/标准/深度）各自做什么、核验什么，直接写一行在工具栏下方，
+     随档位切换更新；只换文本不换样式，双主题自动跟随。 */
+  .depth-hint{margin-top:6px; padding:0 2px; color:var(--dim); font-size:12px; font-weight:650; line-height:1.5}

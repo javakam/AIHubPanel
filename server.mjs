@@ -90,6 +90,8 @@ function sendProxyError(res, method, status, code, message) {
   res.writeHead(status, {
     ...BASE_HEADERS,
     "X-AIHub-Proxy": "1",
+    // 区分「中转自身拒绝」与「上游真实返回」，转发优先模式下据此决定是否回退直连。
+    "X-AIHub-Proxy-Error": code,
     "Content-Type": "application/json; charset=utf-8"
   });
   if (method !== "HEAD") res.end(JSON.stringify({ error: { code, message } }));
@@ -210,10 +212,39 @@ function proxyRequestHeaders(req) {
   return result;
 }
 
+// 浏览器无法伪造 User-Agent 等受限头；站点配置的自定义头经控制头传入，由这里补写后再发往上游。
+const EXTRA_HEADERS_NAME = "x-aihub-extra-headers";
+const EXTRA_HEADER_NAME_RE = /^[A-Za-z0-9-]{1,64}$/;
+const EXTRA_HEADER_DENY = new Set([
+  "host", "content-length", "content-encoding", "accept-encoding", "connection", "keep-alive",
+  "transfer-encoding", "upgrade", "te", "trailer", "expect", "proxy-connection", EXTRA_HEADERS_NAME
+]);
+
+function decodeExtraHeaders(raw) {
+  if (typeof raw !== "string" || !raw || raw.length > 4096) return null;
+  let json;
+  try {
+    json = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (!json || typeof json !== "object" || Array.isArray(json)) return null;
+  const entries = Object.entries(json);
+  if (entries.length === 0 || entries.length > 8) return null;
+  const result = {};
+  for (const [name, value] of entries) {
+    if (!EXTRA_HEADER_NAME_RE.test(name)) return null;
+    if (EXTRA_HEADER_DENY.has(name.toLowerCase())) return null;
+    if (typeof value !== "string" || !value || value.length > 512 || /[\r\n\0]/.test(value)) return null;
+    result[name] = value;
+  }
+  return result;
+}
+
 function proxyResponseHeaders(headers) {
   const result = {};
   const skipped = new Set(["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "set-cookie"]);
-  const protectedHeaders = new Set([...Object.keys(BASE_HEADERS).map(name => name.toLowerCase()), "x-aihub-proxy"]);
+  const protectedHeaders = new Set([...Object.keys(BASE_HEADERS).map(name => name.toLowerCase()), "x-aihub-proxy", "x-aihub-proxy-error"]);
   for (const [name, value] of Object.entries(headers)) {
     const lower = name.toLowerCase();
     if (!skipped.has(lower) && !protectedHeaders.has(lower) && value !== undefined) result[name] = value;
@@ -265,6 +296,18 @@ async function handleProxy(req, res, requestUrl) {
     return;
   }
 
+  let upstreamHeaders = proxyRequestHeaders(req);
+  const rawExtra = req.headers[EXTRA_HEADERS_NAME];
+  if (rawExtra !== undefined) {
+    const extra = decodeExtraHeaders(Array.isArray(rawExtra) ? rawExtra[0] : rawExtra);
+    if (!extra) {
+      sendProxyError(res, method, 400, "invalid_extra_headers", "自定义请求头不合法（名称、取值或数量超出限制）");
+      return;
+    }
+    // 自定义头在白名单之后合并：同名覆盖是站点配置的明确意图；传输控制头已在解码时拒绝。
+    upstreamHeaders = { ...upstreamHeaders, ...extra };
+  }
+
   const transport = target.protocol === "https:" ? https : http;
   let finished = false;
   let timeout;
@@ -284,7 +327,7 @@ async function handleProxy(req, res, requestUrl) {
     port: target.port || undefined,
     path: `${target.pathname}${target.search}`,
     method,
-    headers: proxyRequestHeaders(req),
+    headers: upstreamHeaders,
     // 强制使用已审核的 IP，避免 DNS rebinding；hostname 仍保留用于 HTTPS SNI/Host。
     lookup: (_hostname, options, callback) => {
       // Node 20+ 的 Agent 可能以 all:true 调用自定义 lookup，回调形状随之变为地址数组。
