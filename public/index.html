@@ -195,6 +195,11 @@
           <label for="s_timeout">模型测试超时（秒）</label>
           <input id="s_timeout" type="number" min="3" max="120" value="15" />
         </div>
+        <div class="form-row">
+          <label for="s_longcontext">长上下文测试用量（KB）</label>
+          <input id="s_longcontext" type="number" min="1" max="32" value="4" />
+          <div class="hint">仅「深度」档使用：往请求里塞入这么多填充文本，检验站点是否真的支持声明的上下文长度。调大更严格，也更花 token。</div>
+        </div>
       </div>
       <footer>
         <button class="btn ghost" data-close="setModal">关闭</button>

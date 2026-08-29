@@ -958,3 +958,18 @@
     .list-pane .row-metric .m-val{font-size:13px}
     .list-pane .row-metric .m-label{font-size:13px}
   }
+
+  /* ---------- 模型能力探针逐项结果 ----------
+     追加在所有覆盖块之后，全部走令牌，双主题自动跟随。
+     只用文字 + 单字符标记，不加色块底、渐变或图标，避免一张卡片里堆两套视觉语言。 */
+  .model .mttft{font-family:var(--mono); font-size:12.5px; font-weight:700; color:var(--dim2); flex:0 0 auto}
+  .model .mst.limited{color:var(--warn)}
+  .m-probes{display:flex; flex-wrap:wrap; gap:4px 10px; margin-top:5px; min-width:0}
+  .m-probes .probe{display:inline-flex; align-items:baseline; gap:3px; font-size:12px; font-weight:650; color:var(--dim2); white-space:nowrap; cursor:default}
+  .m-probes .probe b{font-family:var(--mono); font-weight:800}
+  .m-probes .probe.pass b{color:var(--ok)}
+  .m-probes .probe.fail{color:var(--tx)}
+  .m-probes .probe.fail b{color:var(--err)}
+  /* 跳过态靠「–」这个标记本身区分，不再压 opacity：
+     压到能看出差别的程度（.62 实测 3.4:1、.82 浅色下 3.8:1）就已经低于正文 4.5:1 的门槛。 */
+  .m-probes .probe.skip b{color:var(--dim2)}

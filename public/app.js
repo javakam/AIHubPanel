@@ -16,7 +16,7 @@ const LS_SETTINGS  = "aihub.settings.v2";  // 设置的 localStorage key
 const LS_UI_STATE   = "aihub.ui.v1";       // 非敏感界面状态（不含 API Key）
 const VERSION = 3;                          // 导出文件版本号
 const EXPORT_FORMAT = "aihubpanel.stations"; // 导出格式标识，避免误把其它项目会话文件当站点备份
-const DEFAULT_SETTINGS = Object.freeze({ view:"list", theme:"system", proxy:"", concurrency:5, timeout:15, modelSort:"source" });
+const DEFAULT_SETTINGS = Object.freeze({ view:"list", theme:"system", proxy:"", concurrency:5, timeout:15, modelSort:"source", testDepth:"basic", longContextKB:4 });
 // 本地 server.mjs 可提供受限的同源转发。默认仍由浏览器直连；只有直连受到 CORS
 // 或浏览器网络策略拦截时才探测并使用它。纯静态部署没有该路径，会自动回退到直连提示。
 const LOCAL_PROXY_PATH = "/api/proxy";
@@ -37,6 +37,25 @@ const REQUEST_LOG_MAX = 60;
 const REQUEST_LOG_TEXT_MAX = 500;
 const BALANCE_KINDS = new Set(["balance","quota"]);
 const MODEL_SORT_MODES = new Set(["source","available","latency"]);
+// 测试深度：ping 只验证能否调通（1 次请求）；basic 验证能否正常使用（3 次）；
+// deep 额外验证工具调用、JSON 输出与长上下文（6 次，其中长上下文请求体最大）。
+const TEST_DEPTHS = new Set(["ping","basic","deep"]);
+const TEST_DEPTH_LABELS = Object.freeze({ ping:"连通", basic:"标准", deep:"深度" });
+// 探针键必须与 runProbe 分支一一对应；持久化时按此白名单过滤，旧数据与导入备份不会带入未知项。
+const PROBE_KEYS = new Set(["chat","identity","stream","context","tools","json","long"]);
+const PROBE_LABELS = Object.freeze({
+  chat:"指令遵循", identity:"模型一致", stream:"流式输出",
+  context:"多轮上下文", tools:"工具调用", json:"JSON 输出", long:"长上下文"
+});
+const PROBE_STATES = new Set(["pass","fail","skip"]);
+const CAPABILITY_GRADES = new Set(["usable","limited","unusable"]);
+// 单模型能力报告的持久化上限：探针数固定，detail 文本另有 redact 截断，避免 localStorage 被写爆。
+const PROBE_DETAIL_MAX = 200;
+// 长上下文填充：默认 4KB，够识别“声明长上下文但实际早早截断”，又不至于单次请求过于昂贵。
+const LONG_CONTEXT_KB_MIN = 1;
+const LONG_CONTEXT_KB_MAX = 32;
+// 流式探针的读取上限：正常回答远小于此值，超出即视为上游异常刷屏并主动断开。
+const STREAM_PROBE_MAX_BYTES = 256 * 1024;
 // 留空余额路径时的主流中转站探测顺序。管理接口使用站点根路径，兼容 Base URL 已填 /v1 的情况。
 const DEFAULT_BALANCE_ENDPOINTS = Object.freeze([
   { path:"/v1/usage", source:"Sub2API", parser:"sub2api" },
@@ -151,7 +170,45 @@ function normalizeSettings(source){
     concurrency: clampInt(raw.concurrency, 1, 20, DEFAULT_SETTINGS.concurrency),
     timeout: clampInt(raw.timeout, 3, 120, DEFAULT_SETTINGS.timeout),
     // 排序只改变当前展示，不重写接口返回的原始模型顺序。
-    modelSort: MODEL_SORT_MODES.has(raw.modelSort) ? raw.modelSort : DEFAULT_SETTINGS.modelSort
+    modelSort: MODEL_SORT_MODES.has(raw.modelSort) ? raw.modelSort : DEFAULT_SETTINGS.modelSort,
+    testDepth: TEST_DEPTHS.has(raw.testDepth) ? raw.testDepth : DEFAULT_SETTINGS.testDepth,
+    longContextKB: clampInt(raw.longContextKB, LONG_CONTEXT_KB_MIN, LONG_CONTEXT_KB_MAX, DEFAULT_SETTINGS.longContextKB)
+  };
+}
+// 能力报告随站点一起持久化，因此必须像 model 一样做白名单校验：
+// 旧版本缓存没有该字段（返回 null 即降级为“未测”），导入的备份也可能被手工改坏。
+function normalizeCapability(source, apikey=""){
+  if(!source || typeof source !== "object" || Array.isArray(source)) return null;
+  const depth = TEST_DEPTHS.has(source.depth) ? source.depth : null;
+  const grade = CAPABILITY_GRADES.has(source.grade) ? source.grade : null;
+  if(!depth || !grade) return null;
+  // Number(null) 和 Number("") 都等于 0，直接转会把「没测到」写成「0ms」，
+  // 于是未跑流式的模型也会显示「首字 0ms」。先挡掉空值再转数字。
+  const num = value=>{
+    if(value === null || value === undefined || value === "") return null;
+    const n = Number(value);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  };
+  const at = num(source.at);
+  const rawProbes = Array.isArray(source.probes) ? source.probes : [];
+  const seen = new Set();
+  const probes = rawProbes.map(probe=>{
+    if(!probe || typeof probe !== "object") return null;
+    const key = text(probe.key, 20);
+    if(!PROBE_KEYS.has(key) || seen.has(key)) return null;
+    seen.add(key);
+    return {
+      key,
+      state: PROBE_STATES.has(probe.state) ? probe.state : "fail",
+      ms: num(probe.ms),
+      detail: redactSensitiveText(probe.detail, apikey, PROBE_DETAIL_MAX) || ""
+    };
+  }).filter(Boolean).slice(0, PROBE_KEYS.size);
+  if(!probes.length) return null;
+  const metrics = source.metrics && typeof source.metrics === "object" && !Array.isArray(source.metrics) ? source.metrics : {};
+  return {
+    depth, grade, probes, at,
+    metrics: { ttft:num(metrics.ttft), total:num(metrics.total), outputTokens:num(metrics.outputTokens), tps:num(metrics.tps) }
   };
 }
 function normalizeModel(model, apikey=""){
@@ -168,7 +225,8 @@ function normalizeModel(model, apikey=""){
     latency: Number.isFinite(latency) && latency >= 0 ? latency : null,
     lastRequestAt: Number.isFinite(lastRequestAt) && lastRequestAt >= 0 ? lastRequestAt : null,
     // 旧缓存/导入数据可能来自未脱敏版本；加载时重新按当前站点 Key 清洗。
-    err: redactSensitiveText(source.err, apikey, 500) || null
+    err: redactSensitiveText(source.err, apikey, 500) || null,
+    capability: normalizeCapability(source.capability, apikey)
   };
 }
 function normalizeStations(list){
@@ -1139,6 +1197,69 @@ async function responseData(response){
     throw error;
   }finally{ finishResponse(response); }
 }
+// 流式读取：responseData 用 response.text() 一次读完，测不出首字延迟，也无法在超长响应中途停手。
+// 这里增量解析 SSE，回调每个 delta，并把首字时间点交还调用方。
+// 与 responseData 一样在所有出口调用 finishResponse，避免 AbortController 计时器泄漏。
+async function readSseStream(response, onDelta){
+  const state = responseTimeouts.get(response);
+  const aborted = ()=>!!(state && state.controller.signal.aborted);
+  const reader = response.body && typeof response.body.getReader === "function" ? response.body.getReader() : null;
+  if(!reader){ finishResponse(response); throw new Error("当前环境不支持流式读取"); }
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let bytes = 0;
+  let chunks = 0;
+  let ttft = null;
+  let done = false;
+  const started = performance.now();
+  const handleEvent = payload=>{
+    if(payload === "[DONE]"){ done = true; return; }
+    let parsed;
+    try{ parsed = JSON.parse(payload); }catch(e){ return; }
+    const choice = parsed && Array.isArray(parsed.choices) ? parsed.choices[0] : null;
+    const delta = choice && choice.delta && typeof choice.delta === "object" ? choice.delta : null;
+    const piece = delta && typeof delta.content === "string" ? delta.content : "";
+    if(piece){
+      chunks++;
+      if(ttft === null) ttft = performance.now()-started;
+      if(typeof onDelta === "function") onDelta(piece);
+    }
+  };
+  try{
+    while(true){
+      const step = await reader.read();
+      if(step.done) break;
+      bytes += step.value ? step.value.length : 0;
+      if(bytes > STREAM_PROBE_MAX_BYTES){ done = true; break; }
+      buffer += decoder.decode(step.value, { stream:true });
+      // SSE 事件以空行分隔；只取 data: 行，忽略注释与其它字段。
+      let boundary;
+      while((boundary = buffer.indexOf("\n\n")) !== -1){
+        const block = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary+2);
+        block.split("\n").forEach(line=>{
+          const trimmed = line.trim();
+          if(trimmed.startsWith("data:")) handleEvent(trimmed.slice(5).trim());
+        });
+      }
+      if(done) break;
+    }
+    // 部分上游最后一个事件不带结尾空行；补一次解析，避免漏掉整段回答。
+    if(!done && buffer.trim()){
+      buffer.split("\n").forEach(line=>{
+        const trimmed = line.trim();
+        if(trimmed.startsWith("data:")) handleEvent(trimmed.slice(5).trim());
+      });
+    }
+    return { chunks, ttft, done, total:performance.now()-started };
+  }catch(error){
+    if(aborted()) throw new Error("请求超时");
+    throw error;
+  }finally{
+    try{ await reader.cancel(); }catch(e){}
+    finishResponse(response);
+  }
+}
 function localProxyHint(code){
   const hints={
     blocked_target:"内置转发只允许公网 HTTP(S) 地址；内网地址请让站点开启 CORS，或在设置中使用你信任的内网代理。",
@@ -1692,7 +1813,8 @@ async function fetchModelsRequest(id, revision){
           test:old ? old.test : "idle",
           latency:old ? old.latency : null,
           lastRequestAt:old ? old.lastRequestAt : null,
-          err:old ? old.err : null
+          err:old ? old.err : null,
+          capability:old ? old.capability : null
         };
       });
     if(isSelectionStation(id)){
@@ -1723,7 +1845,219 @@ async function fetchModelsRequest(id, revision){
   }
 }
 
-// 模型测试：手动测试与批量 worker 显式区分；不同模型的手动测试可以并行。
+/* ---------------- 模型能力探针 ---------------- */
+// 旧的 ping 只能证明“认证通过且路由存在”：它丢弃响应体，因此 200 空回复、
+// 网关把请求静默换成便宜模型、流式坏掉、多轮上下文被吃掉都测不出来。
+// 每个探针只回答一个可判定的问题，结果写入 model.capability。
+// identity 复用 chat 探针的响应，不额外发请求：ping 1 次、basic 3 次、deep 6 次。
+const DEPTH_PROBES = Object.freeze({
+  ping:["chat"],
+  basic:["chat","identity","stream","context"],
+  deep:["chat","identity","stream","context","tools","json","long"]
+});
+const CAPABILITY_GRADE_LABELS = Object.freeze({ usable:"可用", limited:"受限", unusable:"不可用" });
+function probeToken(prefix){ return prefix + "-" + Math.random().toString(36).slice(2,8).toUpperCase(); }
+async function probeChat(st, payload, timeoutSeconds=settings.timeout){
+  const response = await fetchStationApi(st, buildUrl(apiUrl(st.baseurl, "/v1/chat/completions")), {
+    method:"POST",
+    headers:{ "Content-Type":"application/json" },
+    body: JSON.stringify(payload)
+  }, timeoutSeconds);
+  rememberRequestTransport(st, response);
+  return response;
+}
+// 兼容两种主流响应形态：content 为字符串，或 Anthropic 风格的分段数组。
+function chatMessageContent(data){
+  const choice = data && typeof data === "object" && Array.isArray(data.choices) ? data.choices[0] : null;
+  const message = choice && choice.message && typeof choice.message === "object" ? choice.message : null;
+  if(!message) return "";
+  if(typeof message.content === "string") return message.content;
+  if(Array.isArray(message.content)){
+    return message.content.map(part=>part && typeof part.text === "string" ? part.text : "").join("");
+  }
+  return "";
+}
+function chatToolCalls(data){
+  const choice = data && typeof data === "object" && Array.isArray(data.choices) ? data.choices[0] : null;
+  const message = choice && choice.message && typeof choice.message === "object" ? choice.message : null;
+  const calls = message && Array.isArray(message.tool_calls) ? message.tool_calls : [];
+  return calls.filter(call=>call && typeof call === "object");
+}
+const PROBE_RUNNERS = Object.freeze({
+  // 核心探针：只有它能区分“网关返回 200”和“模型真的产出了内容”。失败即判不可用。
+  async chat(st, ctx){
+    const response = await probeChat(st, {
+      model:ctx.modelId,
+      messages:[{ role:"user", content:"只回复数字 7，不要任何其它内容。" }],
+      max_tokens:16, temperature:0, stream:false
+    });
+    if(!response.ok) return { ok:false, detail: await responseError(response, st.apikey) };
+    const data = await responseData(response);
+    const content = chatMessageContent(data);
+    ctx.answered = true;
+    ctx.reportedModel = data && typeof data === "object" ? text(data.model, 200) : "";
+    if(!content.trim()) return { ok:false, detail:"返回 200 但内容为空，请求很可能没有真正到达模型" };
+    // 小模型偶尔不严格照做，这不代表站点坏了；如实记录但不判失败。
+    if(!/7/.test(content)) return { ok:true, detail:"已产出内容，但未严格遵循指令：" + text(content, 60) };
+    return { ok:true, detail:"按指令回复 " + text(content.trim(), 40) };
+  },
+  // 不发请求：直接比对响应里回报的 model 与请求的 model，用来发现网关偷换模型。
+  async identity(st, ctx){
+    if(!ctx.answered) return { skip:true, detail:"上一步未取得响应，无法比对" };
+    if(!ctx.reportedModel) return { skip:true, detail:"响应未回报 model 字段" };
+    if(ctx.reportedModel === ctx.modelId) return { ok:true, detail:"与请求的模型一致" };
+    // provider/gpt-4o、gpt-4o-2024-08-06 这类前后缀差异属于同系列版本，不算偷换。
+    if(ctx.reportedModel.includes(ctx.modelId) || ctx.modelId.includes(ctx.reportedModel)){
+      return { ok:true, detail:"返回 " + ctx.reportedModel + "，同系列变体" };
+    }
+    return { ok:false, detail:"请求 " + ctx.modelId + "，实际返回 " + ctx.reportedModel };
+  },
+  // 流式是聊天客户端的默认路径；顺带量出首字延迟，它比总耗时更能反映实际手感。
+  async stream(st, ctx){
+    const response = await probeChat(st, {
+      model:ctx.modelId,
+      messages:[{ role:"user", content:"从 1 数到 10，用空格分隔。" }],
+      max_tokens:64, temperature:0, stream:true
+    });
+    if(!response.ok) return { ok:false, detail: await responseError(response, st.apikey) };
+    const result = await readSseStream(response);
+    if(!result.chunks) return { ok:false, detail:"未收到任何增量，站点可能不支持 stream 或被中间层整段缓冲" };
+    ctx.metrics.ttft = result.ttft;
+    ctx.metrics.total = result.total;
+    // 增量条数只是输出规模的近似值：多数网关一个 delta 一个 token，够用来估吞吐。
+    ctx.metrics.outputTokens = result.chunks;
+    if(result.total > 0) ctx.metrics.tps = result.chunks / (result.total/1000);
+    const ttftText = Number.isFinite(result.ttft) ? Math.round(result.ttft) + "ms 首字" : "首字时间未知";
+    if(result.chunks < 2) return { ok:true, detail:"仅 1 个增量，可能被中间层缓冲成一次性返回" };
+    return { ok:true, detail:result.chunks + " 个增量 · " + ttftText };
+  },
+  // 多轮：口令只出现在历史消息里。网关只转发最后一条时，模型答不出来。
+  async context(st, ctx){
+    const token = probeToken("KW");
+    const response = await probeChat(st, {
+      model:ctx.modelId,
+      messages:[
+        { role:"user", content:"记住这个口令：" + token + "。只回复 OK。" },
+        { role:"assistant", content:"OK" },
+        { role:"user", content:"刚才的口令是什么？只回复口令本身。" }
+      ],
+      max_tokens:32, temperature:0, stream:false
+    });
+    if(!response.ok) return { ok:false, detail: await responseError(response, st.apikey) };
+    const data = await responseData(response);
+    const content = chatMessageContent(data);
+    if(!content.trim()) return { ok:false, detail:"返回内容为空" };
+    if(content.toUpperCase().includes(token)) return { ok:true, detail:"正确复述历史消息中的口令" };
+    return { ok:false, detail:"未复述出口令，历史消息可能未被转发：" + text(content, 60) };
+  },
+  // 工具调用是 Agent 场景的硬门槛，很多便宜中转站在这一步暴露真实上游。
+  async tools(st, ctx){
+    const response = await probeChat(st, {
+      model:ctx.modelId,
+      messages:[{ role:"user", content:"查一下北京现在的天气，必须使用提供的工具。" }],
+      tools:[{ type:"function", function:{
+        name:"get_weather",
+        description:"查询指定城市的当前天气",
+        parameters:{ type:"object", properties:{ city:{ type:"string", description:"城市名称" } }, required:["city"] }
+      } }],
+      tool_choice:"auto", max_tokens:128, stream:false
+    });
+    if(!response.ok) return { ok:false, detail: await responseError(response, st.apikey) };
+    const data = await responseData(response);
+    const calls = chatToolCalls(data);
+    if(!calls.length) return { ok:false, detail:"未返回 tool_calls，模型或网关不支持函数调用" };
+    const fn = calls[0].function && typeof calls[0].function === "object" ? text(calls[0].function.name, 60) : "";
+    return { ok:true, detail:"发起调用 " + (fn || "未命名函数") };
+  },
+  // 结构化输出：程序化调用一般依赖它，返回自然语言会直接把下游解析打断。
+  async json(st, ctx){
+    const response = await probeChat(st, {
+      model:ctx.modelId,
+      messages:[{ role:"user", content:'只返回 JSON 对象 {"ok": true}，不要解释，不要代码块。' }],
+      response_format:{ type:"json_object" }, max_tokens:64, temperature:0, stream:false
+    });
+    if(!response.ok) return { ok:false, detail: await responseError(response, st.apikey) };
+    const data = await responseData(response);
+    const content = chatMessageContent(data).trim();
+    if(!content) return { ok:false, detail:"返回内容为空" };
+    // 允许模型习惯性包一层代码块，只要剥掉后是合法 JSON 就算通过。
+    const body = content.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
+    let parsed;
+    try{ parsed = JSON.parse(body); }
+    catch(e){ return { ok:false, detail:"输出不是合法 JSON：" + text(body, 60) }; }
+    if(!parsed || typeof parsed !== "object" || Array.isArray(parsed)){
+      return { ok:false, detail:"输出是合法 JSON 但不是对象" };
+    }
+    return { ok:true, detail:"输出可直接解析为 JSON 对象" };
+  },
+  // 长上下文：口令放在靠前位置。声明了大窗口但实际从最旧内容开始截断的站点会在这里失败。
+  async long(st, ctx){
+    const kb = clampInt(settings.longContextKB, LONG_CONTEXT_KB_MIN, LONG_CONTEXT_KB_MAX, DEFAULT_SETTINGS.longContextKB);
+    const token = probeToken("NL");
+    const filler = "这是一段用于填充上下文的占位文本，本身不含任何有效信息。";
+    const target = kb * 1024;
+    const lines = [];
+    let size = 0;
+    while(size < target){
+      const row = (lines.length + 1) + ". " + filler;
+      lines.push(row);
+      size += row.length * 3;   // 中文按 UTF-8 3 字节估算，够用来控制请求体规模
+    }
+    lines.splice(Math.floor(lines.length * 0.1), 0, "口令：" + token);
+    const prompt = lines.join("\n") + "\n\n上文中出现过一个口令，只回复该口令本身。";
+    // 请求体最大的一个探针，给它更宽的超时，避免把慢而可用的站点误判为失败。
+    const response = await probeChat(st, {
+      model:ctx.modelId,
+      messages:[{ role:"user", content:prompt }],
+      max_tokens:32, temperature:0, stream:false
+    }, Math.max(settings.timeout, 30));
+    if(!response.ok) return { ok:false, detail: await responseError(response, st.apikey) };
+    const data = await responseData(response);
+    const content = chatMessageContent(data);
+    if(!content.trim()) return { ok:false, detail:"返回内容为空" };
+    if(content.toUpperCase().includes(token)) return { ok:true, detail:"约 " + kb + "KB 上下文内取回口令" };
+    return { ok:false, detail:"约 " + kb + "KB 上下文下未取回口令：" + text(content, 60) };
+  }
+});
+async function runProbe(st, key, ctx){
+  const started = performance.now();
+  try{
+    const outcome = await PROBE_RUNNERS[key](st, ctx);
+    const state = outcome && outcome.skip ? "skip" : outcome && outcome.ok ? "pass" : "fail";
+    return { key, state, ms:Math.round(performance.now()-started), detail: text(outcome && outcome.detail, PROBE_DETAIL_MAX) };
+  }catch(error){
+    return { key, state:"fail", ms:Math.round(performance.now()-started), detail: text(networkErrorMessage(error, st && st.apikey), PROBE_DETAIL_MAX) };
+  }
+}
+// chat 失败说明这个模型根本用不了；其余探针失败只说明部分场景受限，仍可日常问答。
+function gradeCapability(probes){
+  const chat = probes.find(probe=>probe.key === "chat");
+  if(!chat || chat.state !== "pass") return "unusable";
+  return probes.some(probe=>probe.state === "fail") ? "limited" : "usable";
+}
+function capabilitySummary(capability){
+  if(!capability) return "";
+  const total = capability.probes.filter(probe=>probe.state !== "skip").length;
+  const passed = capability.probes.filter(probe=>probe.state === "pass").length;
+  return (TEST_DEPTH_LABELS[capability.depth] || capability.depth) + "档 " + passed + "/" + total + " 项通过";
+}
+// 探针在单个模型内串行（后续探针依赖前面的响应，也避免同模型并发触发限流）；
+// 模型之间的并行由 batchTest 的工作池控制。alive() 在每个探针之间检查站点是否还是同一个。
+async function runCapabilitySuite(st, modelId, depth, alive){
+  const keys = DEPTH_PROBES[depth] || DEPTH_PROBES.basic;
+  const ctx = { modelId, answered:false, reportedModel:"", metrics:{ ttft:null, total:null, outputTokens:null, tps:null } };
+  const probes = [];
+  for(const key of keys){
+    if(!alive()) return null;
+    probes.push(await runProbe(st, key, ctx));
+    // chat 都没通过，后面的探针只会重复同一个失败原因，白花请求。
+    if(key === "chat" && probes[0].state !== "pass") break;
+  }
+  if(!alive()) return null;
+  return { depth, grade:gradeCapability(probes), probes, at:Date.now(), metrics:ctx.metrics };
+}
+
+
 async function testModel(id, modelId, revision=stationRevision(id), options={}){
   const fromBatch=options && options.fromBatch === true;
   if(!isCurrentStation(id, revision)) return false;
@@ -1751,6 +2085,7 @@ async function testModel(id, modelId, revision=stationRevision(id), options={}){
     }
     if(!claimManualModelTest(id, modelId, revision)) return false;
   }
+  const depth = TEST_DEPTHS.has(options && options.depth) ? options.depth : settings.testDepth;
   let started=performance.now();
   try{
     st = getById(id);
@@ -1762,32 +2097,35 @@ async function testModel(id, modelId, revision=stationRevision(id), options={}){
       return false;
     }
     model.test = "testing"; model.latency = null; model.err = null; model.lastRequestAt=Date.now();
-    appendRequestLog(st,{ level:"info", kind:"模型测试", method:"POST", endpoint:"/v1/chat/completions", model:modelId, message:"请求开始" });
+    appendRequestLog(st,{ level:"info", kind:"模型测试", method:"POST", endpoint:"/v1/chat/completions", model:modelId, message:(TEST_DEPTH_LABELS[depth]||depth)+"档测试开始" });
     persistModelProgress(id, revision);
     started = performance.now();
-    const response = await fetchStationApi(st, buildUrl(apiUrl(st.baseurl, "/v1/chat/completions")), {
-      method:"POST",
-      headers:{ "Content-Type":"application/json" },
-      body: JSON.stringify({ model:modelId, messages:[{ role:"user", content:"ping" }], max_tokens:5, stream:false })
+    const capability = await runCapabilitySuite(st, modelId, depth, ()=>isCurrentStation(id, revision));
+    // 站点在测试期间被删除或改动：结果已失效，直接丢弃，不写回任何字段。
+    if(!capability || !isCurrentStation(id, revision)) return false;
+    st = getById(id);
+    model = st && st.models.find(item=>item.id===modelId);
+    if(!model) return false;
+    const chat = capability.probes.find(probe=>probe.key === "chat");
+    const failed = capability.probes.filter(probe=>probe.state === "fail");
+    const ok = capability.grade !== "unusable";
+    model.test = ok ? "ok" : "fail";
+    // 延迟仍取非流式单轮往返，保持与旧数据和「响应速度」排序的口径一致。
+    model.latency = ok && chat && Number.isFinite(chat.ms) ? chat.ms : null;
+    model.lastRequestAt = Date.now();
+    // 受限时也保留失败原因，用户不展开明细也能看到卡在哪一项。
+    model.err = failed.length ? redactSensitiveText(failed.map(probe=>(PROBE_LABELS[probe.key]||probe.key)+"："+probe.detail).join("；"), st.apikey, 500) : null;
+    model.capability = normalizeCapability(capability, st.apikey);
+    appendRequestLog(st,{
+      level: ok ? (failed.length ? "warn" : "ok") : "error",
+      kind:"模型测试", method:"POST", endpoint:"/v1/chat/completions", model:modelId,
+      latency: model.latency, transport: st.status && st.status.transport,
+      message: capabilitySummary(capability) + "，判定" + (CAPABILITY_GRADE_LABELS[capability.grade] || capability.grade)
     });
-    if(!isCurrentStation(id, revision)){ finishResponse(response); return false; }
-    rememberRequestTransport(st,response);
-    if(!response.ok){
-      const message=await responseError(response,st.apikey);
-      if(!isCurrentStation(id, revision)) return false;
-      model.test="fail"; model.latency=null; model.lastRequestAt=Date.now(); model.err=message;
-      appendRequestLog(st,{ level:"error", kind:"模型测试", method:"POST", endpoint:"/v1/chat/completions", model:modelId, status:response.status, latency:performance.now()-started, transport:responseTransport(response), message });
-    }
-    else {
-      const latency=performance.now()-started;
-      const transport=responseTransport(response);
-      await discardResponse(response); model.test="ok"; model.latency=latency; model.lastRequestAt=Date.now(); model.err=null;
-      appendRequestLog(st,{ level:"ok", kind:"模型测试", method:"POST", endpoint:"/v1/chat/completions", model:modelId, status:response.status, latency, transport, message:latency >= MODEL_SLOW_LATENCY_MS ? "请求成功，但延迟较高" : "请求成功" });
-    }
   }catch(error){
     if(!isCurrentStation(id, revision)) return false;
     const message=networkErrorMessage(error,st && st.apikey);
-    model.test="fail"; model.latency=null; model.lastRequestAt=Date.now(); model.err=message;
+    model.test="fail"; model.latency=null; model.lastRequestAt=Date.now(); model.err=message; model.capability=null;
     appendRequestLog(st,{ level:"error", kind:"模型测试", method:"POST", endpoint:"/v1/chat/completions", model:modelId, latency:performance.now()-started, message });
   }finally{
     if(!fromBatch) releaseManualModelTest(id, modelId, revision);
@@ -1818,6 +2156,8 @@ async function batchTest(id){
   // 在第一个 await 前冻结选择范围；切换站点或重新渲染均不会污染本次批测的统计。
   const pickedIds=new Set([...selectedModels].filter(modelId=>station.models.some(model=>model.id===modelId)));
   if(!pickedIds.size){ toast("请先勾选要测试的模型", "warn"); return; }
+  // 档位同样在开测前冻结：中途改选择框不会让同一批结果混用两种深度。
+  const depth = settings.testDepth;
   runningBatches.set(id, revision); scheduleRender();
   try{
     const st = getById(id);
@@ -1828,14 +2168,18 @@ async function batchTest(id){
     const worker = async()=>{
       while(cursor < picks.length && isCurrentStation(id, revision)){
         const model = picks[cursor++];
-        await testModel(id, model.id, revision, { fromBatch:true });
+        await testModel(id, model.id, revision, { fromBatch:true, depth });
       }
     };
     await Promise.all(Array.from({ length:Math.min(limit, picks.length) }, worker));
     if(!isCurrentStation(id, revision)) return;
     const current = getById(id);
-    const passed = current.models.filter(model=>pickedIds.has(model.id) && model.test==="ok").length;
-    toast("批量测试完成：选中 " + picks.length + " 个，通过 " + passed + " 个", passed===picks.length ? "ok" : "warn");
+    const tested = current.models.filter(model=>pickedIds.has(model.id));
+    const usable = tested.filter(model=>model.capability ? model.capability.grade==="usable" : model.test==="ok").length;
+    const limited = tested.filter(model=>model.capability && model.capability.grade==="limited").length;
+    const summary = "批量测试完成（" + (TEST_DEPTH_LABELS[depth]||depth) + "档）：选中 " + picks.length + " 个，可用 " + usable + " 个"
+      + (limited ? "，受限 " + limited + " 个" : "");
+    toast(summary, usable===picks.length ? "ok" : "warn");
   }catch(error){
     if(isCurrentStation(id, revision)){
       const current=getById(id);
@@ -1939,6 +2283,13 @@ function setModelSort(mode){
   // 用户主动切换排序才丢弃快照并计算新顺序；保留当前可见模型锚点，
   // 让长列表重新排列时仍停留在用户正在查看的位置。
   modelDisplaySnapshots.clear();
+  render();
+}
+// 档位只影响下一次测试，不重排也不清空已有结果；换档后重新渲染是为了同步按钮提示文案。
+function setTestDepth(depth){
+  if(!TEST_DEPTHS.has(depth) || settings.testDepth === depth) return;
+  settings.testDepth=depth;
+  saveSettings();
   render();
 }
 
@@ -2749,19 +3100,36 @@ function detailHTML(st, isFocus){
   }
   const feedbackHtml=feedback.length ? `<div class="detail-feedback">${feedback.join("")}</div>` : "";
   const displayModels = modelDisplayOrder(st);
+  const depthLabel = TEST_DEPTH_LABELS[settings.testDepth] || settings.testDepth;
   const modelsHtml = displayModels.length ? displayModels.map(({model:m,index})=>{
     const manualAtCapacity = manualModelTestCount(st.id) >= settings.concurrency && m.test!=="testing";
     const modelTestDisabled = missingConfig || connectionBusy || modelListBusy || batchBusy || m.test==="testing" || manualAtCapacity;
     const selected=selectedModels.has(m.id);
     const visualState=modelVisualState(m);
     const modelInputId=`dwModel-${st.id}-${index}`;
-    const testTitle=missingConfig ? "请先填写 Base URL 和 API Key" : m.test==="testing" ? "该模型正在测试" : manualAtCapacity ? "已达到模型测试并发上限" : batchBusy ? "批量测试进行中" : modelListBusy ? "正在获取模型列表" : connectionBusy ? "连通性诊断进行中" : "测试此模型的连通性";
+    const testTitle=missingConfig ? "请先填写 Base URL 和 API Key" : m.test==="testing" ? "该模型正在测试" : manualAtCapacity ? "已达到模型测试并发上限" : batchBusy ? "批量测试进行中" : modelListBusy ? "正在获取模型列表" : connectionBusy ? "连通性诊断进行中" : "按「"+depthLabel+"」档测试此模型";
+    const cap=m.capability;
+    // 有能力报告时状态位直接显示判定结果；没有就沿用旧的成功/失败文案，不并列两套说法。
+    const stateLabel=cap ? (CAPABILITY_GRADE_LABELS[cap.grade] || cap.grade)
+      : visualState==="ok"?"测试成功":visualState==="slow"?"延迟较高":visualState==="fail"?"测试失败":visualState==="testing"?"测试中":"未测试";
+    const stateCls=cap && cap.grade==="limited" ? "limited" : visualState;
+    const stateTitle=cap ? capabilitySummary(cap)+(m.err?"；"+m.err:"") : (m.err || "");
+    const ttft=cap && cap.metrics && Number.isFinite(cap.metrics.ttft) ? Math.round(cap.metrics.ttft) : null;
+    // 逐项结果直接平铺一行：条目最多 7 个，比折叠面板少一次点击，也不额外占高。
+    const probeHtml=cap ? `<div class="m-probes">${cap.probes.map(probe=>{
+      const label=PROBE_LABELS[probe.key] || probe.key;
+      const mark=probe.state==="pass" ? "✓" : probe.state==="fail" ? "✕" : "–";
+      const word=probe.state==="pass" ? "通过" : probe.state==="fail" ? "未通过" : "跳过";
+      const detail=probe.detail ? "：" + probe.detail : "";
+      return `<span class="probe ${probe.state}" title="${esc(label+" "+word+detail)}" aria-label="${esc(label+" "+word+detail)}">${esc(label)}<b>${mark}</b></span>`;
+    }).join("")}</div>` : "";
     return `
       <div class="model model-state-${visualState} ${selected?"selected":""}" data-model-id="${esc(m.id)}">
         <input id="${esc(modelInputId)}" type="checkbox" data-m="${esc(m.id)}" ${selected?"checked":""} ${modelControlsDisabled?"disabled":""}>
         <div class="m-main">
           <div class="model-name-row"><label class="model-select" for="${esc(modelInputId)}" title="切换选择 ${esc(m.id)}"><span class="mname">${esc(m.id)}</span></label><button type="button" class="btn model-run" data-model-test="${esc(m.id)}" ${modelTestDisabled?"disabled":""} title="${esc(testTitle)}" aria-label="${esc(testTitle)}" aria-busy="${m.test==="testing"?"true":"false"}">${m.test==="testing"?SPINNER_ICON:LIGHTNING_ICON}</button><button type="button" class="btn model-copy" data-copy="${esc(m.id)}" title="复制模型 ID" aria-label="复制模型 ID ${esc(m.id)}">${COPY_ICON}</button></div>
-          <div class="m-meta"><span class="mst ${visualState}"${m.err?` title="${esc(m.err)}"`:""}>${visualState==="ok"?"测试成功":visualState==="slow"?"延迟较高":visualState==="fail"?"测试失败":visualState==="testing"?"测试中":"未测试"}</span><span class="mlat ${latencyCls(m.latency)}">${fmtLat(m.latency)}</span></div>
+          <div class="m-meta"><span class="mst ${stateCls}"${stateTitle?` title="${esc(stateTitle)}"`:""}>${esc(stateLabel)}</span><span class="mlat ${latencyCls(m.latency)}">${fmtLat(m.latency)}</span>${ttft!==null?`<span class="mttft" title="流式首字延迟">首字 ${ttft}ms</span>`:""}</div>
+          ${probeHtml}
         </div>
       </div>`;
   }).join("")
@@ -2790,8 +3158,13 @@ function detailHTML(st, isFocus){
             </select></label>
           </div>
           <div class="model-tools-group selection-tools" role="group" aria-label="模型选择与测试">
+            <label class="model-sort" for="dwTestDepth"><span>测试</span><select id="dwTestDepth" aria-label="测试深度" title="连通：只验证能否调通（1 次请求）&#10;标准：验证能否正常使用，含流式与多轮（3 次）&#10;深度：再验证工具调用、JSON 与长上下文（6 次）">
+              <option value="ping" ${settings.testDepth==="ping"?"selected":""}>连通</option>
+              <option value="basic" ${settings.testDepth==="basic"?"selected":""}>标准</option>
+              <option value="deep" ${settings.testDepth==="deep"?"selected":""}>深度</option>
+            </select></label>
             <button type="button" class="btn sm" id="dwToggleSelection" ${modelControlsDisabled?"disabled":""} title="${selectedCount ? "清空当前选择" : "选择全部模型"}" aria-label="${selectedCount ? "清空当前选择" : "选择全部模型"}">${selectedCount ? "清空已选" : "全选"}</button>
-            <button type="button" class="btn primary sm" id="dwBatch" data-controls-disabled="${modelControlsDisabled?"true":"false"}" ${batchDisabled?"disabled":""} aria-busy="${batchBusy?"true":"false"}" title="${batchBusy?"正在批量测试选中的模型":selectedCount?"测试选中的模型":"请先选择要测试的模型"}">${batchBusy?SPINNER_ICON+"批量测试中…":"测试选中"}</button>
+            <button type="button" class="btn primary sm" id="dwBatch" data-controls-disabled="${modelControlsDisabled?"true":"false"}" ${batchDisabled?"disabled":""} aria-busy="${batchBusy?"true":"false"}" title="${batchBusy?"正在批量测试选中的模型":selectedCount?"按「"+depthLabel+"」档测试选中的模型":"请先选择要测试的模型"}">${batchBusy?SPINNER_ICON+"批量测试中…":"测试选中"}</button>
           </div>
         </div>
       </div>
@@ -2884,6 +3257,7 @@ function bindDetail(c, st){
   const bal=c.querySelector("#dwBal"); if(bal && !bal.disabled) bal.onclick=()=>fetchBalance(id);
   const fet=c.querySelector("#dwFetch"); if(fet && !fet.disabled) fet.onclick=()=>fetchModels(id);
   const sort=c.querySelector("#dwModelSort"); if(sort && !sort.disabled) sort.onchange=()=>setModelSort(sort.value);
+  const depth=c.querySelector("#dwTestDepth"); if(depth && !depth.disabled) depth.onchange=()=>setTestDepth(depth.value);
   // 批量按钮初始会因“未选择模型”而禁用；仍需预先绑定，勾选后动态启用才能正常触发。
   const bat=c.querySelector("#dwBatch"); if(bat) bat.onclick=()=>batchTest(id);
   // 勾选框 → 维护 selectedModels 唯一真源
@@ -2932,7 +3306,10 @@ function updateSelectionCount(container, st){
   if(batch){
     const controlsDisabled=batch.dataset.controlsDisabled === "true";
     batch.disabled=controlsDisabled || count===0;
-    batch.title=batch.getAttribute("aria-busy")==="true" ? "正在批量测试选中的模型" : count ? "测试选中的模型" : "请先选择要测试的模型";
+    // 这里是勾选变化后的增量刷新，档位提示必须与首次渲染的文案一致，否则一勾选就丢档位信息。
+    batch.title=batch.getAttribute("aria-busy")==="true" ? "正在批量测试选中的模型"
+      : count ? "按「"+(TEST_DEPTH_LABELS[settings.testDepth]||settings.testDepth)+"」档测试选中的模型"
+      : "请先选择要测试的模型";
   }
 }
 
@@ -3305,18 +3682,21 @@ function openSettings(){
   document.getElementById("s_proxy").value = settings.proxy||"";
   document.getElementById("s_concurrency").value = settings.concurrency;
   document.getElementById("s_timeout").value = settings.timeout;
+  document.getElementById("s_longcontext").value = settings.longContextKB;
   document.getElementById("s_view").value = settings.view;
   showModal("setModal");
 }
 function saveSettingsModal(){
   const settingsSnapshot=JSON.stringify(settings);
   applySettings({
-    // 排序属于全局展示偏好，设置窗口不提供改动项时必须保留当前选择。
+    // 排序与测试档位属于详情栏里的即时选择，设置窗口不提供改动项时必须保留当前值。
     modelSort: settings.modelSort,
+    testDepth: settings.testDepth,
     theme: document.getElementById("s_theme").value,
     proxy: document.getElementById("s_proxy").value,
     concurrency: document.getElementById("s_concurrency").value,
     timeout: document.getElementById("s_timeout").value,
+    longContextKB: document.getElementById("s_longcontext").value,
     view: document.getElementById("s_view").value
   });
   const dataOk=save();
