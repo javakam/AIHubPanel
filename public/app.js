@@ -54,7 +54,7 @@ const PROBE_LABELS = Object.freeze({
 });
 // 每项探针的判据一句话说明，挂在逐项结果标签的悬浮提示上。
 const PROBE_HINTS = Object.freeze({
-  chat:"发固定口令指令，检查回复是否包含口令",
+  chat:"发固定口令指令，检查回复是否包含口令；空正文会放宽预算重试，推理内容也算产出",
   identity:"对比请求的模型与响应回显的 model 字段",
   stream:"检查 SSE 增量是否逐字到达，统计首字延迟",
   context:"第二轮要求复述第一轮的口令",
@@ -71,6 +71,18 @@ const LONG_CONTEXT_KB_MIN = 1;
 const LONG_CONTEXT_KB_MAX = 32;
 // 流式探针的读取上限：正常回答远小于此值，超出即视为上游异常刷屏并主动断开。
 const STREAM_PROBE_MAX_BYTES = 256 * 1024;
+// 探针的输出预算。原来 chat 探针只给 16 token，推理模型的思维链会把预算吃光，
+// 正文为空于是被误判成「不可用」——这类模型在实际使用中完全正常。
+// 给一个宽裕的默认值，识别为推理模型后再抬到 PROBE_REASONING_TOKENS。
+const PROBE_CHAT_TOKENS = 64;
+const PROBE_SHORT_TOKENS = 64;
+const PROBE_STREAM_TOKENS = 128;
+const PROBE_TOOLS_TOKENS = 256;
+const PROBE_REASONING_TOKENS = 2048;
+// 推理模型出字慢：识别后把该模型所有探针的超时下限抬高，避免慢而可用被判失败。
+const PROBE_REASONING_TIMEOUT = 60;
+// chat 探针是唯一能判「不可用」的探针，它的超时不能比默认设置更紧。
+const PROBE_CHAT_MIN_TIMEOUT = 20;
 // 留空余额路径时的主流中转站探测顺序。管理接口使用站点根路径，兼容 Base URL 已填 /v1 的情况。
 const DEFAULT_BALANCE_ENDPOINTS = Object.freeze([
   { path:"/v1/usage", source:"Sub2API", parser:"sub2api" },
@@ -221,7 +233,7 @@ function normalizeCapability(source, apikey=""){
   const metrics = source.metrics && typeof source.metrics === "object" && !Array.isArray(source.metrics) ? source.metrics : {};
   return {
     depth, grade, probes, at,
-    metrics: { ttft:num(metrics.ttft), total:num(metrics.total), outputTokens:num(metrics.outputTokens), tps:num(metrics.tps) }
+    metrics: { ttft:num(metrics.ttft), total:num(metrics.total), outputTokens:num(metrics.outputTokens), tps:num(metrics.tps), chatMs:num(metrics.chatMs) }
   };
 }
 function normalizeModel(model, apikey=""){
@@ -1298,6 +1310,7 @@ async function readSseStream(response, onDelta){
   let buffer = "";
   let bytes = 0;
   let chunks = 0;
+  let reasoningChunks = 0;
   let ttft = null;
   let done = false;
   const started = performance.now();
@@ -1308,10 +1321,17 @@ async function readSseStream(response, onDelta){
     const choice = parsed && Array.isArray(parsed.choices) ? parsed.choices[0] : null;
     const delta = choice && choice.delta && typeof choice.delta === "object" ? choice.delta : null;
     const piece = delta && typeof delta.content === "string" ? delta.content : "";
+    // 推理模型先流思维链再流正文；思维链增量同样证明流式通道正常，单独计数，
+    // 首字延迟也从它开始算——用户看到的第一个字确实是这一刻到的。
+    const reasoningPiece = delta && (typeof delta.reasoning_content === "string" ? delta.reasoning_content
+      : typeof delta.reasoning === "string" ? delta.reasoning : "");
     if(piece){
       chunks++;
       if(ttft === null) ttft = performance.now()-started;
       if(typeof onDelta === "function") onDelta(piece);
+    }else if(reasoningPiece){
+      reasoningChunks++;
+      if(ttft === null) ttft = performance.now()-started;
     }
   };
   try{
@@ -1343,7 +1363,7 @@ async function readSseStream(response, onDelta){
         if(trimmed.startsWith("data:")) handleEvent(trimmed.slice(5).trim());
       });
     }
-    return { chunks, ttft, done, total:performance.now()-started };
+    return { chunks, reasoningChunks, ttft, done, total:performance.now()-started };
   }catch(error){
     if(aborted()) throw new Error("请求超时");
     throw error;
@@ -2000,45 +2020,183 @@ async function probeChat(st, payload, timeoutSeconds=settings.timeout){
   const response = await fetchStationApi(st, buildUrl(apiUrl(st.baseurl, "/v1/chat/completions")), {
     method:"POST",
     headers:{ "Content-Type":"application/json" },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
+    // POST 默认不重试认证头，因为可能重复计费；但 401/403 的请求不会产生用量，
+    // 而只认 x-api-key 的网关在这里被判「不可用」是纯粹的误判，必须允许换一次头再试。
+    allowAuthRetry: true
   }, timeoutSeconds);
   rememberRequestTransport(st, response);
   return response;
 }
-// 兼容两种主流响应形态：content 为字符串，或 Anthropic 风格的分段数组。
-function chatMessageContent(data){
-  const choice = data && typeof data === "object" && Array.isArray(data.choices) ? data.choices[0] : null;
-  const message = choice && choice.message && typeof choice.message === "object" ? choice.message : null;
-  if(!message) return "";
-  if(typeof message.content === "string") return message.content;
-  if(Array.isArray(message.content)){
-    return message.content.map(part=>part && typeof part.text === "string" ? part.text : "").join("");
-  }
+function chatChoice(data){
+  return data && typeof data === "object" && Array.isArray(data.choices) ? data.choices[0] : null;
+}
+function partsText(value){
+  if(typeof value === "string") return value;
+  if(Array.isArray(value)) return value.map(part=>part && typeof part.text === "string" ? part.text : "").join("");
   return "";
 }
+// 兼容三种主流响应形态：content 为字符串、Anthropic 风格的分段数组，
+// 以及少数网关仍沿用 completions 的 choices[0].text。
+function chatMessageContent(data){
+  const choice = chatChoice(data);
+  const message = choice && choice.message && typeof choice.message === "object" ? choice.message : null;
+  if(!message) return choice && typeof choice.text === "string" ? choice.text : "";
+  const content = partsText(message.content);
+  if(content) return content;
+  return typeof choice.text === "string" ? choice.text : "";
+}
+// 推理模型把过程写在 reasoning_content / reasoning 里，正文可能为空。
+// 单独取出来：它证明模型确实产出了内容，只是不在正文字段。
+function chatReasoningText(data){
+  const choice = chatChoice(data);
+  const message = choice && choice.message && typeof choice.message === "object" ? choice.message : null;
+  if(!message) return "";
+  return partsText(message.reasoning_content) || partsText(message.reasoning);
+}
+function chatFinishReason(data){
+  const choice = chatChoice(data);
+  if(!choice) return "";
+  return text(choice.finish_reason || choice.stop_reason, 40);
+}
+// 输出 token 数：正文为空但用量显示有产出，说明预算被思维链吃光，而不是请求没到模型。
+function chatOutputTokens(data){
+  const usage = data && typeof data === "object" && data.usage && typeof data.usage === "object" ? data.usage : null;
+  if(!usage) return null;
+  const details = usage.completion_tokens_details && typeof usage.completion_tokens_details === "object" ? usage.completion_tokens_details : null;
+  const counts = [usage.completion_tokens, usage.output_tokens, details && details.reasoning_tokens]
+    .map(Number).filter(value=>Number.isFinite(value) && value > 0);
+  return counts.length ? Math.max(...counts) : null;
+}
 function chatToolCalls(data){
-  const choice = data && typeof data === "object" && Array.isArray(data.choices) ? data.choices[0] : null;
+  const choice = chatChoice(data);
   const message = choice && choice.message && typeof choice.message === "object" ? choice.message : null;
   const calls = message && Array.isArray(message.tool_calls) ? message.tool_calls : [];
   return calls.filter(call=>call && typeof call === "object");
 }
+// 上游临时状态：限流与网关级错误说明“这一刻没排上”，不是模型不可用。
+const PROBE_RETRY_STATUS = new Set([408,409,425,429,500,502,503,504,529]);
+function probeSleep(ms){ return new Promise(resolve=>setTimeout(resolve, ms)); }
+// 请求形状按站点实测结果改写：o1/o3 系列拒绝 temperature≠1，一部分网关只认
+// max_completion_tokens，个别老网关完全不接受 token 上限字段。协商结果记在 ctx 里，
+// 同一模型的后续探针直接复用，不重复试探。
+function shapedPayload(ctx, payload){
+  const shape = ctx.shape || {};
+  const out = { ...payload };
+  if(shape.dropTemperature) delete out.temperature;
+  // 推理模型的思维链会先吃掉输出预算，正文预算必须抬到能剩下内容为止。
+  if(ctx.minTokens && Number.isFinite(out.max_tokens)) out.max_tokens = Math.max(out.max_tokens, ctx.minTokens);
+  if(shape.tokenField === "max_completion_tokens" && out.max_tokens !== undefined){
+    out.max_completion_tokens = out.max_tokens;
+    delete out.max_tokens;
+  }
+  if(shape.dropTokenLimit){ delete out.max_tokens; delete out.max_completion_tokens; }
+  return out;
+}
+function adaptPayloadShape(ctx, payload, detail){
+  const shape = ctx.shape;
+  if(payload.temperature !== undefined && !shape.dropTemperature && /temperature/.test(detail)){ shape.dropTemperature = true; return true; }
+  if(/max_completion_tokens/.test(detail) && shape.tokenField !== "max_completion_tokens"){ shape.tokenField = "max_completion_tokens"; return true; }
+  if(/max_tokens/.test(detail) && !shape.dropTokenLimit){ shape.dropTokenLimit = true; return true; }
+  return false;
+}
+// 统一出口：!ok 时错误文本已在这里读出（响应体只能读一次），调用方直接用 result.error。
+async function sendProbeChat(st, ctx, payload, timeoutSeconds=settings.timeout){
+  let seconds = Math.max(Number(timeoutSeconds) || settings.timeout, ctx.timeoutFloor || 0);
+  let lastError = "";
+  let retried = false;
+  let timeoutRetried = false;
+  for(let attempt=0; attempt<5; attempt++){
+    let response;
+    const sentAt = performance.now();
+    try{
+      response = await probeChat(st, shapedPayload(ctx, payload), seconds);
+    }catch(error){
+      const message = networkErrorMessage(error, st && st.apikey);
+      // 慢而可用的模型（尤其推理模型）在默认 15s 下必然超时。放宽一次窗口再试，
+      // 只有第二次仍然超时才认为真的不可用。放宽结果记进 ctx，后续探针直接沿用。
+      if(message === "请求超时" && !timeoutRetried){
+        timeoutRetried = true;
+        seconds = Math.min(Math.max(seconds * 3, PROBE_REASONING_TIMEOUT), 120);
+        ctx.timeoutFloor = Math.max(ctx.timeoutFloor || 0, seconds);
+        continue;
+      }
+      throw error;
+    }
+    if(response.ok) return { ok:true, response, ms:performance.now()-sentAt };
+    lastError = await responseError(response, st.apikey);
+    if((response.status === 400 || response.status === 422) && adaptPayloadShape(ctx, payload, lastError.toLowerCase())) continue;
+    if(PROBE_RETRY_STATUS.has(response.status) && !retried){
+      retried = true;
+      await probeSleep(response.status === 429 ? 1500 : 600);
+      continue;
+    }
+    return { ok:false, error:lastError };
+  }
+  return { ok:false, error:lastError };
+}
+// 判定用的“可见输出”：正文优先，正文为空时退到推理内容——两者都能证明模型真的产出了东西。
+function probeVisibleText(data){
+  const content = chatMessageContent(data);
+  if(content.trim()) return { text:content, fromReasoning:false };
+  const reasoning = chatReasoningText(data);
+  return { text:reasoning, fromReasoning:!!reasoning.trim() };
+}
+// 正文为空时给出可执行的解释，而不是一句“没到模型”。
+function emptyContentReason(data){
+  const finish = chatFinishReason(data);
+  const tokens = chatOutputTokens(data);
+  if(/content_filter|safety/i.test(finish)) return { usable:true, detail:"被内容策略拦截（finish_reason=" + finish + "），模型本身可用" };
+  if(/length|max_tokens|max_output/i.test(finish)) return { detail:"输出预算用尽（finish_reason=" + finish + "）" };
+  if(tokens) return { detail:"用量显示已产出 " + tokens + " 个输出 token 但正文为空（预算很可能被思维链占满）" };
+  return { detail:"返回 200 但正文为空" + (finish ? "（finish_reason=" + finish + "）" : "") };
+}
+// 推理模型正文为空是常态，这类模型实际可用；识别后放宽预算与超时，供后续探针复用。
+function relaxForReasoning(ctx){
+  ctx.minTokens = Math.max(ctx.minTokens || 0, PROBE_REASONING_TOKENS);
+  ctx.timeoutFloor = Math.max(ctx.timeoutFloor || 0, PROBE_REASONING_TIMEOUT);
+}
+// 小模型偶尔不严格照做，这不代表站点坏了；如实记录但不判失败。
+function chatFollowVerdict(content){
+  if(!/7/.test(content)) return { ok:true, detail:"已产出内容，但未严格遵循指令：" + text(content, 60) };
+  return { ok:true, detail:"按指令回复 " + text(content.trim(), 40) };
+}
 const PROBE_RUNNERS = Object.freeze({
-  // 核心探针：只有它能区分“网关返回 200”和“模型真的产出了内容”。失败即判不可用。
+  // 核心探针：只有它能区分“网关返回 200”和“模型真的产出了内容”。失败即判不可用，
+  // 因此这里对“形状不合、临时限流、预算被思维链吃光、慢”全部先重试或改写，再下结论。
   async chat(st, ctx){
-    const response = await probeChat(st, {
-      model:ctx.modelId,
-      messages:[{ role:"user", content:"只回复数字 7，不要任何其它内容。" }],
-      max_tokens:16, temperature:0, stream:false
-    });
-    if(!response.ok) return { ok:false, detail: await responseError(response, st.apikey) };
-    const data = await responseData(response);
-    const content = chatMessageContent(data);
+    const ask = { model:ctx.modelId, messages:[{ role:"user", content:"只回复数字 7，不要任何其它内容。" }], max_tokens:PROBE_CHAT_TOKENS, temperature:0, stream:false };
+    const result = await sendProbeChat(st, ctx, ask, Math.max(settings.timeout, PROBE_CHAT_MIN_TIMEOUT));
+    if(!result.ok) return { ok:false, detail: result.error };
+    // 延迟取「最终成功那一次请求」的往返，而不是整个探针耗时：中途的形状协商与限流退避
+    // 不该记到模型头上，否则被限流过一次的模型会永远排在最后。
+    ctx.metrics.chatMs = result.ms;
+    const data = await responseData(result.response);
     ctx.answered = true;
     ctx.reportedModel = data && typeof data === "object" ? text(data.model, 200) : "";
-    if(!content.trim()) return { ok:false, detail:"返回 200 但内容为空，请求很可能没有真正到达模型" };
-    // 小模型偶尔不严格照做，这不代表站点坏了；如实记录但不判失败。
-    if(!/7/.test(content)) return { ok:true, detail:"已产出内容，但未严格遵循指令：" + text(content, 60) };
-    return { ok:true, detail:"按指令回复 " + text(content.trim(), 40) };
+    const content = chatMessageContent(data);
+    if(content.trim()) return chatFollowVerdict(content);
+    // 正文为空：先看是不是推理内容占满了输出，再决定要不要放宽预算重试一次。
+    const reasoning = chatReasoningText(data).trim();
+    if(reasoning){
+      relaxForReasoning(ctx);
+      return { ok:true, detail:"正文为空但返回了推理内容，按推理模型处理：" + text(reasoning, 60) };
+    }
+    const reason = emptyContentReason(data);
+    if(reason.usable) return { ok:true, detail:reason.detail };
+    relaxForReasoning(ctx);
+    // 无论是「预算用尽」还是「没有任何线索的空正文」，都再给一次机会：预算抬高、去掉
+    // temperature 与 stream 之外的约束，换成开放式提问。个别网关只在特定参数组合下
+    // 返回空 200，直接判不可用会把能正常聊天的模型误杀。
+    const retryAsk = { model:ctx.modelId, messages:[{ role:"user", content:"你好，请用一句话自我介绍。" }], max_tokens:PROBE_CHAT_TOKENS, stream:false };
+    const retry = await sendProbeChat(st, ctx, retryAsk, Math.max(settings.timeout, PROBE_REASONING_TIMEOUT));
+    if(!retry.ok) return { ok:false, detail:reason.detail + "，放宽输出预算重试仍失败：" + retry.error };
+    ctx.metrics.chatMs = retry.ms;
+    const retryData = await responseData(retry.response);
+    if(!ctx.reportedModel && retryData && typeof retryData === "object") ctx.reportedModel = text(retryData.model, 200);
+    const visible = probeVisibleText(retryData);
+    if(!visible.text.trim()) return { ok:false, detail:reason.detail + "，放宽到 " + ctx.minTokens + " token 并换用开放式提问后正文仍为空" };
+    return { ok:true, detail:"首次" + reason.detail + "；放宽预算后正常输出" + (visible.fromReasoning ? "（推理内容）" : "：" + text(visible.text.trim(), 40)) };
   },
   // 不发请求：直接比对响应里回报的 model 与请求的 model，用来发现网关偷换模型。
   async identity(st, ctx){
@@ -2053,45 +2211,50 @@ const PROBE_RUNNERS = Object.freeze({
   },
   // 流式是聊天客户端的默认路径；顺带量出首字延迟，它比总耗时更能反映实际手感。
   async stream(st, ctx){
-    const response = await probeChat(st, {
+    const result = await sendProbeChat(st, ctx, {
       model:ctx.modelId,
       messages:[{ role:"user", content:"从 1 数到 10，用空格分隔。" }],
-      max_tokens:64, temperature:0, stream:true
+      max_tokens:PROBE_STREAM_TOKENS, temperature:0, stream:true
     });
-    if(!response.ok) return { ok:false, detail: await responseError(response, st.apikey) };
-    const result = await readSseStream(response);
-    if(!result.chunks) return { ok:false, detail:"未收到任何增量，站点可能不支持 stream 或被中间层整段缓冲" };
-    ctx.metrics.ttft = result.ttft;
-    ctx.metrics.total = result.total;
+    if(!result.ok) return { ok:false, detail: result.error };
+    const stream = await readSseStream(result.response);
+    const total = stream.chunks + stream.reasoningChunks;
+    if(!total) return { ok:false, detail:"未收到任何增量，站点可能不支持 stream 或被中间层整段缓冲" };
+    ctx.metrics.ttft = stream.ttft;
+    ctx.metrics.total = stream.total;
     // 增量条数只是输出规模的近似值：多数网关一个 delta 一个 token，够用来估吞吐。
-    ctx.metrics.outputTokens = result.chunks;
-    if(result.total > 0) ctx.metrics.tps = result.chunks / (result.total/1000);
-    const ttftText = Number.isFinite(result.ttft) ? Math.round(result.ttft) + "ms 首字" : "首字时间未知";
-    if(result.chunks < 2) return { ok:true, detail:"仅 1 个增量，可能被中间层缓冲成一次性返回" };
-    return { ok:true, detail:result.chunks + " 个增量 · " + ttftText };
+    ctx.metrics.outputTokens = total;
+    if(stream.total > 0) ctx.metrics.tps = total / (stream.total/1000);
+    const ttftText = Number.isFinite(stream.ttft) ? Math.round(stream.ttft) + "ms 首字" : "首字时间未知";
+    const reasoningNote = stream.reasoningChunks ? "（含 " + stream.reasoningChunks + " 条推理增量）" : "";
+    if(total < 2) return { ok:true, detail:"仅 1 个增量，可能被中间层缓冲成一次性返回" };
+    return { ok:true, detail:total + " 个增量" + reasoningNote + " · " + ttftText };
   },
   // 多轮：口令只出现在历史消息里。网关只转发最后一条时，模型答不出来。
   async context(st, ctx){
     const token = probeToken("KW");
-    const response = await probeChat(st, {
+    const result = await sendProbeChat(st, ctx, {
       model:ctx.modelId,
       messages:[
         { role:"user", content:"记住这个口令：" + token + "。只回复 OK。" },
         { role:"assistant", content:"OK" },
         { role:"user", content:"刚才的口令是什么？只回复口令本身。" }
       ],
-      max_tokens:32, temperature:0, stream:false
+      max_tokens:PROBE_SHORT_TOKENS, temperature:0, stream:false
     });
-    if(!response.ok) return { ok:false, detail: await responseError(response, st.apikey) };
-    const data = await responseData(response);
-    const content = chatMessageContent(data);
-    if(!content.trim()) return { ok:false, detail:"返回内容为空" };
-    if(content.toUpperCase().includes(token)) return { ok:true, detail:"正确复述历史消息中的口令" };
-    return { ok:false, detail:"未复述出口令，历史消息可能未被转发：" + text(content, 60) };
+    if(!result.ok) return { ok:false, detail: result.error };
+    const data = await responseData(result.response);
+    // 推理模型可能把口令写在思维链里再截断正文；两处都算复述成功。
+    const visible = probeVisibleText(data);
+    if(!visible.text.trim()) return { ok:false, detail:emptyContentReason(data).detail };
+    if(visible.text.toUpperCase().includes(token)){
+      return { ok:true, detail:"正确复述历史消息中的口令" + (visible.fromReasoning ? "（出现在推理内容中）" : "") };
+    }
+    return { ok:false, detail:"未复述出口令，历史消息可能未被转发：" + text(visible.text, 60) };
   },
   // 工具调用是 Agent 场景的硬门槛，很多便宜中转站在这一步暴露真实上游。
   async tools(st, ctx){
-    const response = await probeChat(st, {
+    const result = await sendProbeChat(st, ctx, {
       model:ctx.modelId,
       messages:[{ role:"user", content:"查一下北京现在的天气，必须使用提供的工具。" }],
       tools:[{ type:"function", function:{
@@ -2099,10 +2262,10 @@ const PROBE_RUNNERS = Object.freeze({
         description:"查询指定城市的当前天气",
         parameters:{ type:"object", properties:{ city:{ type:"string", description:"城市名称" } }, required:["city"] }
       } }],
-      tool_choice:"auto", max_tokens:128, stream:false
+      tool_choice:"auto", max_tokens:PROBE_TOOLS_TOKENS, stream:false
     });
-    if(!response.ok) return { ok:false, detail: await responseError(response, st.apikey) };
-    const data = await responseData(response);
+    if(!result.ok) return { ok:false, detail: result.error };
+    const data = await responseData(result.response);
     const calls = chatToolCalls(data);
     if(!calls.length) return { ok:false, detail:"未返回 tool_calls，模型或网关不支持函数调用" };
     const fn = calls[0].function && typeof calls[0].function === "object" ? text(calls[0].function.name, 60) : "";
@@ -2110,15 +2273,15 @@ const PROBE_RUNNERS = Object.freeze({
   },
   // 结构化输出：程序化调用一般依赖它，返回自然语言会直接把下游解析打断。
   async json(st, ctx){
-    const response = await probeChat(st, {
+    const result = await sendProbeChat(st, ctx, {
       model:ctx.modelId,
       messages:[{ role:"user", content:'只返回 JSON 对象 {"ok": true}，不要解释，不要代码块。' }],
-      response_format:{ type:"json_object" }, max_tokens:64, temperature:0, stream:false
+      response_format:{ type:"json_object" }, max_tokens:PROBE_STREAM_TOKENS, temperature:0, stream:false
     });
-    if(!response.ok) return { ok:false, detail: await responseError(response, st.apikey) };
-    const data = await responseData(response);
+    if(!result.ok) return { ok:false, detail: result.error };
+    const data = await responseData(result.response);
     const content = chatMessageContent(data).trim();
-    if(!content) return { ok:false, detail:"返回内容为空" };
+    if(!content) return { ok:false, detail:emptyContentReason(data).detail };
     // 允许模型习惯性包一层代码块，只要剥掉后是合法 JSON 就算通过。
     const body = content.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
     let parsed;
@@ -2145,17 +2308,17 @@ const PROBE_RUNNERS = Object.freeze({
     lines.splice(Math.floor(lines.length * 0.1), 0, "口令：" + token);
     const prompt = lines.join("\n") + "\n\n上文中出现过一个口令，只回复该口令本身。";
     // 请求体最大的一个探针，给它更宽的超时，避免把慢而可用的站点误判为失败。
-    const response = await probeChat(st, {
+    const result = await sendProbeChat(st, ctx, {
       model:ctx.modelId,
       messages:[{ role:"user", content:prompt }],
-      max_tokens:32, temperature:0, stream:false
+      max_tokens:PROBE_SHORT_TOKENS, temperature:0, stream:false
     }, Math.max(settings.timeout, 30));
-    if(!response.ok) return { ok:false, detail: await responseError(response, st.apikey) };
-    const data = await responseData(response);
-    const content = chatMessageContent(data);
-    if(!content.trim()) return { ok:false, detail:"返回内容为空" };
-    if(content.toUpperCase().includes(token)) return { ok:true, detail:"约 " + kb + "KB 上下文内取回口令" };
-    return { ok:false, detail:"约 " + kb + "KB 上下文下未取回口令：" + text(content, 60) };
+    if(!result.ok) return { ok:false, detail: result.error };
+    const data = await responseData(result.response);
+    const visible = probeVisibleText(data);
+    if(!visible.text.trim()) return { ok:false, detail:emptyContentReason(data).detail };
+    if(visible.text.toUpperCase().includes(token)) return { ok:true, detail:"约 " + kb + "KB 上下文内取回口令" + (visible.fromReasoning ? "（出现在推理内容中）" : "") };
+    return { ok:false, detail:"约 " + kb + "KB 上下文下未取回口令：" + text(visible.text, 60) };
   }
 });
 async function runProbe(st, key, ctx){
@@ -2184,7 +2347,14 @@ function capabilitySummary(capability){
 // 模型之间的并行由 batchTest 的工作池控制。alive() 在每个探针之间检查站点是否还是同一个。
 async function runCapabilitySuite(st, modelId, depth, alive){
   const keys = DEPTH_PROBES[depth] || DEPTH_PROBES.basic;
-  const ctx = { modelId, answered:false, reportedModel:"", metrics:{ ttft:null, total:null, outputTokens:null, tps:null } };
+  // shape/minTokens/timeoutFloor 在探针之间共享：chat 一旦协商出可用的请求形状或
+  // 认出是推理模型，后续探针直接沿用，不再重复试探。
+  const ctx = {
+    modelId, answered:false, reportedModel:"",
+    shape:{ dropTemperature:false, tokenField:"max_tokens", dropTokenLimit:false },
+    minTokens:0, timeoutFloor:0,
+    metrics:{ ttft:null, total:null, outputTokens:null, tps:null, chatMs:null }
+  };
   const probes = [];
   for(const key of keys){
     if(!alive()) return null;
@@ -2249,7 +2419,10 @@ async function testModel(id, modelId, revision=stationRevision(id), options={}){
     const ok = capability.grade !== "unusable";
     model.test = ok ? "ok" : "fail";
     // 延迟仍取非流式单轮往返，保持与旧数据和按速度排序的口径一致。
-    model.latency = ok && chat && Number.isFinite(chat.ms) ? chat.ms : null;
+    // 优先用 chat 探针最后一次成功请求的净往返：探针整体耗时可能包含形状协商与限流退避。
+    const chatMs = capability.metrics && Number.isFinite(capability.metrics.chatMs) ? capability.metrics.chatMs
+      : chat && Number.isFinite(chat.ms) ? chat.ms : null;
+    model.latency = ok && chatMs !== null ? Math.round(chatMs) : null;
     model.lastRequestAt = Date.now();
     // 受限时也保留失败原因，用户不展开明细也能看到卡在哪一项。
     model.err = failed.length ? redactSensitiveText(failed.map(probe=>(PROBE_LABELS[probe.key]||probe.key)+"："+probe.detail).join("；"), st.apikey, 500) : null;
