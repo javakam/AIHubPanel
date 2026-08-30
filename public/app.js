@@ -1459,6 +1459,39 @@ function stationAuthHeaders(st, mode, originalHeaders={}){
   if(st && st.headers) Object.assign(headers, st.headers);
   return headers;
 }
+// 部分网关按客户端指纹放行（401 "unauthorized client detected"）：浏览器直连的 User-Agent
+// 受 Chromium 限制无法伪造，无论页面写什么都带浏览器 UA，必然被拒。此时改走本地同源转发，
+// 由 Node 补写一个网关认可的 CLI 客户端 UA 重试一次；成功则把 UA 固化进站点自定义头，
+// 之后该站点所有请求自动走转发，不需要用户手工配置。
+const CLIENT_GATEWAY_UA = "claude-cli/2.0.0 (external, cli)";
+const CLIENT_DETECT_RE = /unauthorized[_\s-]?client|client[_\s-]?detect/i;
+async function healClientBlockedStation(st, url, mode, requestOptions, failedResponse){
+  if(!st || settings.proxy || !isCrossOriginHttpUrl(url)) return null;
+  // 已配置 User-Agent 的站点说明用户已有明确意图，其 UA 被拒时不越权改写。
+  if(Object.keys(st.headers || {}).some(key=>key.toLowerCase()==="user-agent")) return null;
+  let signature="";
+  try{ signature=(await failedResponse.clone().text()).slice(0,2000); }catch(e){}
+  if(!CLIENT_DETECT_RE.test(signature)) return null;
+  if(!await checkLocalProxy()) return null;
+  const relayOptions=stationRelayOptions({ ...st, headers:{ ...(st.headers||{}), "User-Agent":CLIENT_GATEWAY_UA } });
+  let attempt;
+  try{
+    attempt=await fetchWithTimeout(url, { ...requestOptions, ...relayOptions, headers:stationAuthHeaders(st,mode,requestOptions.headers||{}) });
+  }catch(error){ return null; }
+  if(!attempt.ok) return null;
+  rememberRequestTransport(st, attempt);
+  if(st.status) st.status.authMode=mode;
+  st.headers={ ...(st.headers||{}), "User-Agent":CLIENT_GATEWAY_UA };
+  save();
+  toast("该网关按客户端指纹放行（401 unauthorized client）：已自动为站点配置 User-Agent 并改走本地同源转发", "ok");
+  appendRequestLog(st,{
+    level:"warn", kind:"自动修复", method:String(requestOptions.method||"GET").toUpperCase(), endpoint:url,
+    transport:"builtin", latency:null,
+    message:"客户端指纹被拒（unauthorized client），自动配置 User-Agent: "+CLIENT_GATEWAY_UA+" 并走本地转发后成功"
+  });
+  return attempt;
+}
+
 // OpenAI 兼容通常是 Bearer，但一部分 Sub2API/New API 衍生网关仅接受 x-api-key。
 // 只在明确的认证失败（401/403）后切换一次，避免重复非幂等请求或掩盖其它真实错误。
 async function fetchStationApi(st, url, options={}, timeoutSeconds=settings.timeout){
@@ -1478,6 +1511,12 @@ async function fetchStationApi(st, url, options={}, timeoutSeconds=settings.time
   await discardResponse(response);
   response=await request(alternate);
   if(response.ok && st && st.status) st.status.authMode=alternate;
+  // 两种认证头都被拒且网关明说「客户端不合法」时，大概率不是 Key 错，而是直连 UA 被指纹识别。
+  // 401 响应说明上游没有执行任何操作，这里补带客户端 UA 经本地转发重试一次是安全的。
+  if(!response.ok && (response.status===401 || response.status===403)){
+    const healed=await healClientBlockedStation(st, url, preferred, requestOptions, response);
+    if(healed) return healed;
+  }
   return response;
 }
 
