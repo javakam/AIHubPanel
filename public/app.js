@@ -947,7 +947,7 @@ function toast(msg, type){
   const icon = type==="ok" ? "✓" : type==="err" ? "✕" : type==="warn" ? "!" : "ℹ";
   el.innerHTML = `<span class="ti">${icon}</span><span>${esc(msg)}</span>`;
   box.appendChild(el);
-  setTimeout(()=>{ el.style.opacity="0"; el.style.transform="translateX(20px)"; setTimeout(()=>el.remove(),200); }, 3200);
+  setTimeout(()=>{ el.style.opacity="0"; el.style.transform="translateY(16px)"; setTimeout(()=>el.remove(),200); }, 3200);
 }
 
 /* ---------------- 网络层 ---------------- */
@@ -2537,30 +2537,36 @@ function filtered(){
   );
 }
 
-// 模型固定按响应速度展示：测出延迟的按快到慢排在前面，未测与失败的按接口返回顺序排在后面。
+// 排序与一键复制共用的「可用」口径：有能力报告看档位（usable），旧数据退回测试成功口径。
+function isModelUsable(model){
+  const grade=model.capability && model.capability.grade;
+  return grade ? grade==="usable" : model.test==="ok";
+}
+// 模型按「可用性优先、速度其次」展示：可用的按响应速度从快到慢排最前，其次受限（同样按速度），
+// 未测试/测试中按接口返回顺序在后，不可用与失败垫底。
 // 测试进行中沿用上一次的顺序快照，卡片不会在 idle -> testing -> ok/fail 之间跳位；
-// 一轮测试全部落地后重排，新的延迟立即生效。
+// 一轮测试全部落地后重排，新的判定与延迟立即生效。
 function modelSourceSignature(st){
   return Array.isArray(st && st.models) ? st.models.map(model=>model.id).join("\u0001") : "";
 }
 function computeModelDisplayOrder(st){
   const indexed=(st && Array.isArray(st.models) ? st.models : []).map((model,index)=>({ model,index }));
-  const availabilityRank=model=>{
-    if(model.test === "ok") return 0;
-    if(model.test === "testing") return 1;
-    if(model.test === "idle") return 2;
-    return 3;
+  const usabilityRank=model=>{
+    const grade=model.capability && model.capability.grade;
+    if(grade==="usable") return 0;
+    if(grade==="limited") return 1;
+    if(grade==="unusable" || model.test==="fail") return 3;
+    if(model.test==="ok") return 0; // 无能力报告的旧数据退回旧口径
+    return 2; // 未测试 / 测试中
   };
   indexed.sort((a,b)=>{
-    const aMeasured=a.model.test === "ok" && Number.isFinite(a.model.latency);
-    const bMeasured=b.model.test === "ok" && Number.isFinite(b.model.latency);
+    const rank=usabilityRank(a.model)-usabilityRank(b.model);
+    if(rank) return rank;
+    const aMeasured=Number.isFinite(a.model.latency);
+    const bMeasured=Number.isFinite(b.model.latency);
     if(aMeasured !== bMeasured) return aMeasured ? -1 : 1;
-    if(aMeasured){
-      const latency=a.model.latency-b.model.latency;
-      if(latency) return latency;
-    }
-    const rank=availabilityRank(a.model)-availabilityRank(b.model);
-    return rank || a.index-b.index;
+    if(aMeasured && a.model.latency !== b.model.latency) return a.model.latency-b.model.latency;
+    return a.index-b.index;
   });
   return indexed;
 }
@@ -3365,6 +3371,7 @@ function detailHTML(st, isFocus){
   const modelControlsDisabled=missingConfig || connectionBusy || activity.modelWork;
   const stationBusy=activity.any;
   const selectedCount = st.models.reduce((count,model)=>count+(selectedModels.has(model.id)?1:0),0);
+  const copyableCount = st.models.reduce((count,model)=>count+((selectedModels.has(model.id) && isModelUsable(model))?1:0),0);
   // 未选择模型时不提供无效的批量入口；原生 disabled 保持按钮尺寸，选择后再启用，不会触发布局变化。
   const batchDisabled = modelControlsDisabled || selectedCount === 0;
   const balanceTxt = hasBalance(st) ? balanceDisplay(st) : "已获取（查看原始返回）";
@@ -3439,7 +3446,7 @@ function detailHTML(st, isFocus){
 
     <div class="sec">
       <div class="model-toolbar">
-        <div class="model-toolbar-heading"><span class="title">模型（${st.models.length}）</span><span class="order-note" title="固定按响应速度排序：已测出延迟的从快到慢排在前面，未测试与失败的按接口返回顺序排在后面。测试进行中保持原位，一轮测完后统一重排。">按速度排序</span><span class="selection-count" title="批量测试并发 ${esc(settings.concurrency)}">已选 ${selectedCount} · 并发 ${esc(settings.concurrency)}</span></div>
+        <div class="model-toolbar-heading"><span class="title">模型（${st.models.length}）</span><span class="order-note" title="排序规则：可用的排最前，同档内按响应速度从快到慢；之后依次是受限、未测试、不可用/失败。测试进行中保持原位，一轮测完后统一重排。">可用优先</span><span class="selection-count" title="批量测试并发 ${esc(settings.concurrency)}">已选 ${selectedCount} · 并发 ${esc(settings.concurrency)}</span></div>
         <div class="model-toolbar-groups">
           <div class="model-tools-group data-tools" role="group" aria-label="模型数据操作">
             <button type="button" class="btn action sm" id="dwFetch" ${modelControlsDisabled?"disabled":""} aria-busy="${modelListBusy?"true":"false"}" title="从当前站点获取模型列表">${modelFetchLabel}</button>
@@ -3451,6 +3458,7 @@ function detailHTML(st, isFocus){
               <option value="basic" ${settings.testDepth==="basic"?"selected":""}>标准</option>
               <option value="deep" ${settings.testDepth==="deep"?"selected":""}>深度</option>
             </select></label>
+            <button type="button" class="btn action sm" id="dwCopyModels" ${copyableCount?"":"disabled"} title="${copyableCount?esc("复制 "+copyableCount+" 个已勾选的可用模型 ID（逗号分隔，单/多选都适用，可直接粘贴到 new-api 的模型列表）"):"勾选模型并测出可用后，可一键复制模型 ID"}">复制可用${copyableCount?" "+copyableCount:""}</button>
             <button type="button" class="btn primary sm" id="dwBatch" data-controls-disabled="${modelControlsDisabled?"true":"false"}" ${batchDisabled?"disabled":""} aria-busy="${batchBusy?"true":"false"}" title="${batchBusy?"正在批量测试选中的模型":selectedCount?"按「"+depthLabel+"」档测试选中的模型":"请先选择要测试的模型"}">${batchBusy?SPINNER_ICON+"批量测试中…":"测试选中"}</button>
           </div>
         </div>
@@ -3548,6 +3556,7 @@ function bindDetail(c, st){
   const depth=c.querySelector("#dwTestDepth"); if(depth && !depth.disabled) depth.onchange=()=>setTestDepth(depth.value);
   // 批量按钮初始会因“未选择模型”而禁用；仍需预先绑定，勾选后动态启用才能正常触发。
   const bat=c.querySelector("#dwBatch"); if(bat) bat.onclick=()=>batchTest(id);
+  const cp=c.querySelector("#dwCopyModels"); if(cp) cp.onclick=()=>copySelectedUsableModels(id);
   // 勾选框 → 维护 selectedModels 唯一真源
   c.querySelectorAll("#dwModels input[type=checkbox]").forEach(ch=>{
     ch.onchange=()=>{
@@ -3604,22 +3613,37 @@ function updateSelectionCount(container, st){
       : count ? "按「"+(TEST_DEPTH_LABELS[settings.testDepth]||settings.testDepth)+"」档测试选中的模型"
       : "请先选择要测试的模型";
   }
+  const copyBtn=container.querySelector("#dwCopyModels");
+  if(copyBtn){
+    const usableCount=st.models.reduce((total,model)=>total+((selectedModels.has(model.id) && isModelUsable(model))?1:0),0);
+    copyBtn.disabled=usableCount===0;
+    copyBtn.textContent="复制可用" + (usableCount?" "+usableCount:"");
+    copyBtn.title=usableCount ? "复制 "+usableCount+" 个已勾选的可用模型 ID（逗号分隔，单/多选都适用，可直接粘贴到 new-api 的模型列表）"
+      : "勾选模型并测出可用后，可一键复制模型 ID";
+  }
 }
 
 // 复制：优先 Clipboard API（需安全上下文 https/localhost）；非安全上下文（如局域网 http）降级 execCommand
-function copyText(t){
+function copyText(t, okMsg){
   if(navigator.clipboard && navigator.clipboard.writeText){
-    navigator.clipboard.writeText(t).then(()=>toast("已复制","ok")).catch(()=>fallbackCopy(t));
-  } else fallbackCopy(t);
+    navigator.clipboard.writeText(t).then(()=>toast(okMsg || "已复制","ok")).catch(()=>fallbackCopy(t, okMsg));
+  } else fallbackCopy(t, okMsg);
 }
-function fallbackCopy(t){
+function fallbackCopy(t, okMsg){
   const ta=document.createElement("textarea");
   ta.value=t; ta.style.position="fixed"; ta.style.left="-9999px"; ta.style.opacity="0";  // 离屏，避免页面跳动
   document.body.appendChild(ta); ta.focus(); ta.select();
   let ok=false;
   try{ ok=document.execCommand("copy"); }catch(e){ ok=false; }
   ta.remove();
-  toast(ok?"已复制":"复制失败（请手动复制）", ok?"ok":"err");   // 据真实返回值提示，不谎报成功
+  toast(ok?(okMsg || "已复制"):"复制失败（请手动复制）", ok?"ok":"err");   // 据真实返回值提示，不谎报成功
+}
+// 一键复制：把已勾选且可用的模型 ID 拼成逗号分隔串，单/多选都适用，可直接粘进 new-api 的模型列表。
+function copySelectedUsableModels(id){
+  const st=getById(id); if(!st) return;
+  const ids=st.models.filter(model=>selectedModels.has(model.id) && isModelUsable(model)).map(model=>model.id);
+  if(!ids.length){ toast("勾选中没有已测可用的模型，请先测试", "warn"); return; }
+  copyText(ids.join(","), ids.length===1 ? "已复制模型 " + ids[0] : "已复制 " + ids.length + " 个可用模型（逗号分隔，可直接粘贴到 new-api）");
 }
 
 /* ---------------- 添加/编辑弹窗 ---------------- */

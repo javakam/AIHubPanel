@@ -548,17 +548,17 @@
   .delete-confirm{min-width:122px; justify-content:center; color:#fff!important; border-color:rgba(255,173,173,.52)!important; background:linear-gradient(135deg,#d8575c,#bb3f4d)!important; box-shadow:0 8px 18px rgba(187,63,77,.22)}
   .delete-confirm:hover:not(:disabled){background:linear-gradient(135deg,#e16569,#c74553)!important; box-shadow:0 11px 23px rgba(187,63,77,.30)}
 
-  /* ---------- toast ---------- */
-  .toasts{position:fixed; right:18px; bottom:18px; z-index:80; display:flex; flex-direction:column; gap:10px; max-width:340px}
+  /* ---------- toast：页面底部居中，向上弹出 ---------- */
+  .toasts{position:fixed; left:50%; bottom:22px; transform:translateX(-50%); z-index:80; display:flex; flex-direction:column; align-items:center; gap:10px; max-width:min(480px, calc(100vw - 32px))}
   .toast{
     background:var(--sf); border:1px solid var(--bd2); border-left:3px solid var(--pri);
     border-radius:12px; padding:11px 14px; font-size:13px; box-shadow:var(--shadow-sm);
-    animation:slidein .2s ease; display:flex; gap:9px; align-items:flex-start;
+    animation:risein .22s ease; display:flex; gap:9px; align-items:flex-start;
   }
   .toast.ok{border-left-color:var(--ok)} .toast.err{border-left-color:var(--err)} .toast.warn{border-left-color:var(--warn)}
   .toast .ti{flex:0 0 auto; margin-top:1px}
   .toast span:last-child{min-width:0; overflow-wrap:anywhere}
-  @keyframes slidein{from{transform:translateX(20px); opacity:0}to{transform:translateX(0); opacity:1}}
+  @keyframes risein{from{transform:translateY(16px); opacity:0}to{transform:translateY(0); opacity:1}}
 
   .spin{animation:rot 1s linear infinite}
   @keyframes rot{to{transform:rotate(360deg)}}
