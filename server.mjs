@@ -17,6 +17,9 @@ const HOST = process.env.AI_HUB_HOST || "127.0.0.1";
 const PROXY_PATH = "/api/proxy";
 const PROXY_HEALTH_PATH = "/api/proxy/health";
 const PROXY_TIMEOUT_MS = Math.min(Math.max(Number(process.env.AI_HUB_PROXY_TIMEOUT_MS) || 120000, 1000), 120000);
+if (process.env.AI_HUB_PROXY_TIMEOUT_MS && Number(process.env.AI_HUB_PROXY_TIMEOUT_MS) !== PROXY_TIMEOUT_MS) {
+  console.warn(`AI_HUB_PROXY_TIMEOUT_MS=${process.env.AI_HUB_PROXY_TIMEOUT_MS} 超出 1000–120000 ms 的允许范围，已按 ${PROXY_TIMEOUT_MS} ms 生效`);
+}
 const PROXY_MAX_BODY_BYTES = 10 * 1024 * 1024;
 // 模型目录与诊断响应通常很小；为异常公网目标设置硬上限，避免 relay 长时间转发无限响应。
 const PROXY_MAX_RESPONSE_BYTES = 50 * 1024 * 1024;
@@ -404,7 +407,9 @@ async function handleProxy(req, res, requestUrl) {
   });
   bodyLimit.on("error", error => {
     upstream.destroy(error);
-    if (!res.headersSent) fail(413, "body_too_large", "请求体不能超过 10 MiB");
+    // sendProxyError 自己会在响应头已发出时断开连接；这里不再重复判断，
+    // 否则超限请求可能既收不到 413 也不被关闭，只能等超时。
+    fail(413, "body_too_large", "请求体不能超过 10 MiB");
   });
   req.on("aborted", () => upstream.destroy());
   req.pipe(bodyLimit).pipe(upstream);

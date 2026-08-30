@@ -383,6 +383,8 @@
   .model-toolbar-heading{display:flex; align-items:baseline; gap:9px; min-width:0; flex-wrap:wrap}
   .model-toolbar .title{margin:0}
   .model-toolbar .selection-count{font-size:13px; color:var(--tx); font-weight:700; white-space:nowrap}
+  /* 排序规则固定，不再是可选项，因此只用一枚说明性标签替代原来的下拉。 */
+  .model-toolbar .order-note{font-size:12.5px; color:var(--dim); font-weight:650; white-space:nowrap; padding:1px 7px; border:1px solid var(--bd); border-radius:999px; cursor:help}
   .model-toolbar-groups{display:flex; align-items:center; justify-content:flex-end; gap:8px; min-width:0; flex-wrap:wrap}
   .model-tools-group{display:inline-flex; align-items:center; gap:7px; min-width:0; padding:4px; border:1px solid var(--bd); border-radius:10px; background:var(--sf2)}
   .model-tools-group.selection-tools{border-color:rgba(142,127,255,.25)}
@@ -390,8 +392,12 @@
   .model-sort select{height:31px; min-width:112px; padding:0 26px 0 9px; border:1px solid var(--bd); border-radius:8px; background:var(--sf); color:var(--tx); font-size:13px; font-weight:650; cursor:pointer}
   .model-sort select:hover:not(:disabled){border-color:var(--bd2); background:var(--row-hover)}
   .model-sort select:disabled{opacity:.55; cursor:not-allowed}
+  /* 三态主勾选框：全选/部分（半选）/无，替代原先“全选/清空已选”文字按钮。 */
+  .model-select-all{display:inline-flex; align-items:center; gap:7px; min-height:31px; padding:0 5px; color:var(--tx); font-size:13px; font-weight:700; white-space:nowrap; cursor:pointer; user-select:none; -webkit-user-select:none}
+  .model-select-all input[type=checkbox]{width:16px; height:16px; margin:0; accent-color:var(--pri); cursor:pointer}
+  .model-select-all:has(input:disabled){opacity:.55; cursor:not-allowed}
+  .model-select-all input[type=checkbox]:disabled{cursor:not-allowed}
   #dwFetch{min-width:128px; justify-content:center}
-  #dwToggleSelection{min-width:82px; justify-content:center}
   #dwBatch{min-width:116px; justify-content:center}
   .models-error{margin:-2px 0 10px; padding:8px 10px; color:var(--err); background:var(--err-soft); border:1px solid var(--err-bd); border-radius:9px; font-size:13px; line-height:1.5; overflow-wrap:anywhere}
   /* 卡片高度只由模型名决定；状态行预留固定高度，单测状态变化不会让整个 Grid 重排。 */
@@ -723,6 +729,7 @@
       .model-toolbar-groups{display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); width:100%; justify-content:stretch}
       .model-tools-group{min-width:0; justify-content:space-between}
       .model-tools-group .btn{min-width:0; flex:1 1 auto}
+      .model-tools-group .model-select-all{min-width:0; flex:0 1 auto}
       .model-tools-group .model-sort{min-width:0; flex:1 1 auto; justify-content:space-between}
       .model-tools-group .model-sort select{min-width:0; flex:1 1 auto}
    }
@@ -929,13 +936,10 @@
     .list-pane .row-actions .status-refresh{width:30px; height:30px; flex-basis:30px}
     .list-pane .row-actions .station-manage .btn{width:26px; height:26px}
    }
-  /* 320px 级别的小屏：数据操作维持明确的两行结构，不挤压排序文字或制造横向滚动。 */
+  /* 320px 级别的小屏：数据操作只剩获取按钮，占满整行即可，不需要再分行。 */
   @media (max-width:360px){
-    .model-tools-group.data-tools{display:grid; grid-template-columns:minmax(0,1fr) 31px; grid-template-areas:"fetch refresh" "sort sort"; align-items:center}
-    .model-tools-group.data-tools:not(.has-refresh){grid-template-columns:1fr; grid-template-areas:"fetch" "sort"}
-    .model-tools-group.data-tools #dwFetch{grid-area:fetch; width:100%; min-width:0}
-    .model-tools-group.data-tools .model-sort{grid-area:sort; width:100%; min-width:0}
-    .model-tools-group.data-tools .model-sort select{min-width:0; flex:1 1 auto}
+    .model-tools-group.data-tools{display:flex}
+    .model-tools-group.data-tools #dwFetch{width:100%; min-width:0}
   }
   @media (max-width:1024px){
     .list-pane{flex:1 1 auto; width:100%; max-width:100%; min-width:0; align-self:stretch}

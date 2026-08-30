@@ -16,7 +16,7 @@ const LS_SETTINGS  = "aihub.settings.v2";  // 设置的 localStorage key
 const LS_UI_STATE   = "aihub.ui.v1";       // 非敏感界面状态（不含 API Key）
 const VERSION = 3;                          // 导出文件版本号
 const EXPORT_FORMAT = "aihubpanel.stations"; // 导出格式标识，避免误把其它项目会话文件当站点备份
-const DEFAULT_SETTINGS = Object.freeze({ view:"list", theme:"system", proxy:"", concurrency:5, timeout:15, modelSort:"source", testDepth:"basic", longContextKB:4 });
+const DEFAULT_SETTINGS = Object.freeze({ view:"list", theme:"system", proxy:"", concurrency:5, timeout:15, testDepth:"basic", longContextKB:4 });
 // 本地 server.mjs 可提供受限的同源转发。默认仍由浏览器直连；只有直连受到 CORS
 // 或浏览器网络策略拦截时才探测并使用它。纯静态部署没有该路径，会自动回退到直连提示。
 const LOCAL_PROXY_PATH = "/api/proxy";
@@ -36,7 +36,6 @@ const MODEL_SLOW_LATENCY_MS = 800;
 const REQUEST_LOG_MAX = 40;
 const REQUEST_LOG_TEXT_MAX = 500;
 const BALANCE_KINDS = new Set(["balance","quota"]);
-const MODEL_SORT_MODES = new Set(["source","available","latency"]);
 // 测试深度：ping 只验证能否调通（1 次请求）；basic 验证能否正常使用（3 次）；
 // deep 额外验证工具调用、JSON 输出与长上下文（6 次，其中长上下文请求体最大）。
 const TEST_DEPTHS = new Set(["ping","basic","deep"]);
@@ -105,7 +104,7 @@ let scheduledRenderHandle = null;                      // 合并同一帧内的�
 let selectedModels = new Set();                       // 详情中勾选的「待批量测试」模型 id 集合（唯一真源）
 // 按站点保存模型勾选集合；只写入模型/站点 ID，不会把 API Key 放进 UI 状态。
 let selectedModelsByStation = new Map();
-// 非 source 排序只在用户主动切换排序时建立快照；模型测试状态变化不得改变卡片位置。
+// 展示顺序快照：测试进行中保持上一次的排序，落地后按新延迟重排。
 const modelDisplaySnapshots = new Map();
 // 原生拖拽期间冻结全量渲染，避免异步请求把正在拖动的 DOM 替换掉。
 let activeDrag = null;
@@ -185,8 +184,6 @@ function normalizeSettings(source){
     proxy: text(raw.proxy),
     concurrency: clampInt(raw.concurrency, 1, 20, DEFAULT_SETTINGS.concurrency),
     timeout: clampInt(raw.timeout, 3, 120, DEFAULT_SETTINGS.timeout),
-    // 排序只改变当前展示，不重写接口返回的原始模型顺序。
-    modelSort: MODEL_SORT_MODES.has(raw.modelSort) ? raw.modelSort : DEFAULT_SETTINGS.modelSort,
     testDepth: TEST_DEPTHS.has(raw.testDepth) ? raw.testDepth : DEFAULT_SETTINGS.testDepth,
     longContextKB: clampInt(raw.longContextKB, LONG_CONTEXT_KB_MIN, LONG_CONTEXT_KB_MAX, DEFAULT_SETTINGS.longContextKB)
   };
@@ -380,11 +377,16 @@ function seedDefault(persist=true){
 // 持久化失败的统一告警：高频写入（测试进度、连通性诊断等）不应连续轰炸，
 // 故按 4 秒去重弹一次红色提示；调用方仍负责关键结构性操作的显式回滚。
 let warnPersistenceAt = 0;
-function warnPersistence(){
+const PERSISTENCE_WARNINGS = Object.freeze({
+  stations:"站点数据写入浏览器存储失败（可能已满或被禁用），本次改动未保存，建议导出备份后清理",
+  settings:"设置写入浏览器存储失败（可能已满或被禁用），本次改动未保存，建议导出备份后清理",
+  ui:"界面状态写入浏览器存储失败（可能已满或被禁用），选择与视图位置不会被记住"
+});
+function warnPersistence(kind){
   const now = Date.now();
   if(now - warnPersistenceAt < 4000) return;
   warnPersistenceAt = now;
-  toast("浏览器存储写入失败（可能已满或被禁用），改动未持久化，建议导出备份后清理", "err");
+  toast(PERSISTENCE_WARNINGS[kind] || "浏览器存储写入失败（可能已满或被禁用），改动未持久化，建议导出备份后清理", "err");
 }
 
 // 持久化：仅写 stations / settings 两个 key
@@ -1130,6 +1132,15 @@ function rememberRequestTransport(st, response){
   if(st && st.status && ["direct","builtin","custom"].includes(transport)) st.status.transport=transport;
   return transport;
 }
+// 站点配置了自定义请求头但本次请求没能走本地转发时提示一次：浏览器会静默丢掉
+// User-Agent 等受限头，用户需要知道“配置已写但这次没生效”，否则失败原因完全无法解释。
+let customHeaderDegradedAt = 0;
+function warnCustomHeaderDegraded(){
+  const now=Date.now();
+  if(now - customHeaderDegradedAt < 8000) return;
+  customHeaderDegradedAt = now;
+  toast("本地同源转发不可用，本次请求改为浏览器直连；User-Agent 等受限自定义请求头可能未生效", "warn");
+}
 function localRelayUnavailableError(){
   const error=new Error("浏览器直连失败（可能被 CORS 拦截），且当前页面没有可用的本地同源转发。请通过 server.mjs 启动本面板后从 http://127.0.0.1:4179 打开，或在设置中配置可信代理。");
   error.aiHubRelayUnavailable=true;
@@ -1208,13 +1219,18 @@ async function fetchWithTimeout(url, options={}, timeoutSeconds=settings.timeout
     let response;
     let transport=settings.proxy ? "custom" : "direct";
     const canRelay=!settings.proxy && isCrossOriginHttpUrl(url);
-    if(relayFirst && canRelay && await checkLocalProxy()){
+    const relayReady=relayFirst && canRelay ? await checkLocalProxy() : false;
+    // 需要转发却拿不到转发（纯静态部署、server.mjs 未启动、或已配置自定义代理）时也要提示，
+    // 否则受限自定义头被浏览器丢弃后完全没有可见线索。
+    if(relayFirst && !relayReady && customHeaders) warnCustomHeaderDegraded();
+    if(relayReady){
       try{
         const relayResponse=await startRelay();
         // 本地转发只放行公网地址；中转自身拒绝（如内网目标）时回退直连，让本机/内网网关继续可用。
         if(relayResponse.headers.get("x-aihub-proxy-error") === "blocked_target"){
           try{ await relayResponse.body?.cancel(); }catch(e){}
           finishResponse(relayResponse);
+          warnCustomHeaderDegraded();
         }else{
           responseTransports.set(relayResponse,"builtin");
           response=relayResponse;
@@ -1223,6 +1239,8 @@ async function fetchWithTimeout(url, options={}, timeoutSeconds=settings.timeout
       }catch(relayError){
         if(controller.signal.aborted) throw new Error("请求超时");
         // 转发不可用不直接失败：自定义头可能被浏览器忽略，但直连仍有机会完成任务。
+        // 静默降级会让「配了 User-Agent 却仍被网关拒绝」变成无法解释的失败，因此明确提示一次。
+        warnCustomHeaderDegraded();
         response=null;
       }
     }
@@ -1813,7 +1831,7 @@ function extractNewApiBalance(data, statusData){
   // 无法取到展示配置、或站点选择 TOKENS 时，保留原始额度并明确不作为货币展示。
   return { value:raw, kind:"quota", unit:"额度", unlimited:false, note:rawNote };
 }
-function extractGenericBalance(data, fallbackKind="balance"){
+function extractGenericBalance(data){
   const moneyKeys=["total_balance","remain_balance","remaining_balance","available_balance","balance","remain","credit","available_credit"];
   const availableQuotaKeys=["remain_quota","remaining_quota","available_quota","left_quota","total_available"];
   for(const scope of balanceScopes(data)){
@@ -1843,7 +1861,7 @@ async function fetchNewApiStatus(st, revision){
 }
 async function extractBalanceForCandidate(data, candidate, st, revision){
   if(candidate.parser === "sub2api"){
-    return extractSub2ApiBalance(data) || extractGenericBalance(data, "balance");
+    return extractSub2ApiBalance(data) || extractGenericBalance(data);
   }
   if(candidate.parser === "newapi"){
     const usage=payloadData(data);
@@ -1852,7 +1870,7 @@ async function extractBalanceForCandidate(data, candidate, st, revision){
       return extractNewApiBalance(data, status);
     }
   }
-  return extractGenericBalance(data, "balance");
+  return extractGenericBalance(data);
 }
 function setBalanceResult(st, result, data, candidate){
   st.status.balance=result.unlimited ? null : result.value;
@@ -1920,9 +1938,9 @@ async function fetchModelsRequest(id, revision){
       return;
     }
     const data = await responseData(response);
-    if(!isCurrentStation(id, revision)){ finishResponse(response); return; }
+    if(!isCurrentStation(id, revision)) return;
     const source = data && typeof data === "object" ? (Array.isArray(data.data) ? data.data : Array.isArray(data.models) ? data.models : null) : null;
-  if(!source) throw new Error("返回中未找到模型列表");
+    if(!source) throw new Error("返回中未找到模型列表");
     const previous = new Map(st.models.map(model=>[model.id, model]));
     const seen = new Set();
     st.models = source.map(item=>text(typeof item === "string" ? item : item && (item.id || item.name),256))
@@ -2230,7 +2248,7 @@ async function testModel(id, modelId, revision=stationRevision(id), options={}){
     const failed = capability.probes.filter(probe=>probe.state === "fail");
     const ok = capability.grade !== "unusable";
     model.test = ok ? "ok" : "fail";
-    // 延迟仍取非流式单轮往返，保持与旧数据和「响应速度」排序的口径一致。
+    // 延迟仍取非流式单轮往返，保持与旧数据和按速度排序的口径一致。
     model.latency = ok && chat && Number.isFinite(chat.ms) ? chat.ms : null;
     model.lastRequestAt = Date.now();
     // 受限时也保留失败原因，用户不展开明细也能看到卡在哪一项。
@@ -2244,7 +2262,11 @@ async function testModel(id, modelId, revision=stationRevision(id), options={}){
     });
   }catch(error){
     if(!isCurrentStation(id, revision)) return false;
-    const message=networkErrorMessage(error,st && st.apikey);
+    // 重新取一次实时对象：异常可能在任意一步抛出，此时手里的引用未必还是列表中的那一个。
+    st = getById(id);
+    model = st && st.models.find(item=>item.id===modelId);
+    if(!st || !model) return false;
+    const message=networkErrorMessage(error,st.apikey);
     model.test="fail"; model.latency=null; model.lastRequestAt=Date.now(); model.err=message; model.capability=null;
     appendRequestLog(st,{ level:"error", kind:"模型测试", method:"POST", endpoint:"/v1/chat/completions", model:modelId, latency:performance.now()-started, message });
   }finally{
@@ -2252,7 +2274,7 @@ async function testModel(id, modelId, revision=stationRevision(id), options={}){
   }
   if(!isCurrentStation(id, revision)) return false;
   persistModelProgress(id, revision);
-  return model.test === "ok";
+  return !!model && model.test === "ok";
 }
 
 // 批量测试：工作池受 settings.concurrency 限制；运行中禁止同站重复测试。
@@ -2342,12 +2364,13 @@ function filtered(){
   );
 }
 
-// 模型接口返回顺序是用户可预期的基线。非默认排序使用运行时快照：
-// 测试状态从 idle -> testing -> ok/fail 时只更新当前卡片内容，绝不把卡片换到新位置。
+// 模型固定按响应速度展示：测出延迟的按快到慢排在前面，未测与失败的按接口返回顺序排在后面。
+// 测试进行中沿用上一次的顺序快照，卡片不会在 idle -> testing -> ok/fail 之间跳位；
+// 一轮测试全部落地后重排，新的延迟立即生效。
 function modelSourceSignature(st){
   return Array.isArray(st && st.models) ? st.models.map(model=>model.id).join("\u0001") : "";
 }
-function computeModelDisplayOrder(st, mode){
+function computeModelDisplayOrder(st){
   const indexed=(st && Array.isArray(st.models) ? st.models : []).map((model,index)=>({ model,index }));
   const availabilityRank=model=>{
     if(model.test === "ok") return 0;
@@ -2356,17 +2379,6 @@ function computeModelDisplayOrder(st, mode){
     return 3;
   };
   indexed.sort((a,b)=>{
-    if(mode === "available"){
-      const rank=availabilityRank(a.model)-availabilityRank(b.model);
-      if(rank) return rank;
-      // 已通过模型中，较快的排在前面；其余情况保持接口原顺序。
-      if(a.model.test === "ok" && b.model.test === "ok"){
-        const latency=(Number.isFinite(a.model.latency) ? a.model.latency : Infinity) - (Number.isFinite(b.model.latency) ? b.model.latency : Infinity);
-        if(latency) return latency;
-      }
-      return a.index-b.index;
-    }
-    // 响应速度仅比较已有成功响应的模型；未测试与失败模型仍按接口顺序排在后面。
     const aMeasured=a.model.test === "ok" && Number.isFinite(a.model.latency);
     const bMeasured=b.model.test === "ok" && Number.isFinite(b.model.latency);
     if(aMeasured !== bMeasured) return aMeasured ? -1 : 1;
@@ -2379,46 +2391,32 @@ function computeModelDisplayOrder(st, mode){
   });
   return indexed;
 }
-
+// 站点仍有测试在跑（单个、批量或刚领取还未写入 testing）时视为未落地，此期间不重排。
+function isModelOrderSettled(st){
+  if(!st) return true;
+  if(isBatchRunning(st.id) || isManualModelTestRunning(st.id)) return false;
+  return !(Array.isArray(st.models) && st.models.some(model=>model.test === "testing"));
+}
 function modelDisplayOrder(st){
   const indexed=(st && Array.isArray(st.models) ? st.models : []).map((model,index)=>({ model,index }));
-  const mode=MODEL_SORT_MODES.has(settings.modelSort) ? settings.modelSort : "source";
-  if(mode === "source") return indexed;
+  if(!st || !indexed.length) return indexed;
   const signature=modelSourceSignature(st);
   const previous=modelDisplaySnapshots.get(st.id);
-  if(previous && previous.mode===mode && previous.signature===signature){
+  if(previous && previous.signature===signature && !isModelOrderSettled(st)){
     const byId=new Map(indexed.map(entry=>[entry.model.id,entry]));
     const ordered=previous.ids.map(id=>byId.get(id)).filter(Boolean);
     if(ordered.length===indexed.length) return ordered;
   }
-  const ordered=computeModelDisplayOrder(st,mode);
-  modelDisplaySnapshots.set(st.id,{ mode, signature, ids:ordered.map(entry=>entry.model.id) });
+  const ordered=computeModelDisplayOrder(st);
+  modelDisplaySnapshots.set(st.id,{ signature, ids:ordered.map(entry=>entry.model.id) });
   return ordered;
 }
 
-function setModelSort(mode){
-  if(!MODEL_SORT_MODES.has(mode) || settings.modelSort === mode) return;
-  settings.modelSort=mode;
-  saveSettings();
-  // 用户主动切换排序才丢弃快照并计算新顺序；保留当前可见模型锚点，
-  // 让长列表重新排列时仍停留在用户正在查看的位置。
-  modelDisplaySnapshots.clear();
-  render();
-}
 // 档位只影响下一次测试，不重排也不清空已有结果；换档后重新渲染是为了同步按钮提示文案。
 function setTestDepth(depth){
   if(!TEST_DEPTHS.has(depth) || settings.testDepth === depth) return;
   settings.testDepth=depth;
   saveSettings();
-  render();
-}
-
-// 非默认排序故意在测试期间稳定展示。用户主动点击时才按刚得到的结果重新排序。
-function refreshModelSort(stationId){
-  const st=getById(stationId);
-  const mode=MODEL_SORT_MODES.has(settings.modelSort) ? settings.modelSort : "source";
-  if(!st || mode==="source" || !st.models.length) return;
-  modelDisplaySnapshots.delete(st.id);
   render();
 }
 
@@ -3268,23 +3266,18 @@ function detailHTML(st, isFocus){
 
     <div class="sec">
       <div class="model-toolbar">
-        <div class="model-toolbar-heading"><span class="title">模型（${st.models.length}）</span><span class="selection-count" title="批量测试并发 ${esc(settings.concurrency)}">已选 ${selectedCount} · 并发 ${esc(settings.concurrency)}</span></div>
+        <div class="model-toolbar-heading"><span class="title">模型（${st.models.length}）</span><span class="order-note" title="固定按响应速度排序：已测出延迟的从快到慢排在前面，未测试与失败的按接口返回顺序排在后面。测试进行中保持原位，一轮测完后统一重排。">按速度排序</span><span class="selection-count" title="批量测试并发 ${esc(settings.concurrency)}">已选 ${selectedCount} · 并发 ${esc(settings.concurrency)}</span></div>
         <div class="model-toolbar-groups">
-          <div class="model-tools-group data-tools ${settings.modelSort!=="source"?"has-refresh":""}" role="group" aria-label="模型数据操作">
+          <div class="model-tools-group data-tools" role="group" aria-label="模型数据操作">
             <button type="button" class="btn action sm" id="dwFetch" ${modelControlsDisabled?"disabled":""} aria-busy="${modelListBusy?"true":"false"}" title="从当前站点获取模型列表">${modelFetchLabel}</button>
-            <label class="model-sort" for="dwModelSort"><span>排序</span><select id="dwModelSort" aria-label="模型排序方式" ${!st.models.length?"disabled":""}>
-              <option value="source" ${settings.modelSort==="source"?"selected":""}>获取顺序</option>
-              <option value="available" ${settings.modelSort==="available"?"selected":""}>可用性</option>
-              <option value="latency" ${settings.modelSort==="latency"?"selected":""}>响应速度</option>
-            </select></label>
           </div>
           <div class="model-tools-group selection-tools" role="group" aria-label="模型选择与测试">
+            <label class="model-select-all" for="dwSelectAll" title="${selectedCount && selectedCount===st.models.length ? "清空当前选择" : "选择全部模型"}"><input id="dwSelectAll" type="checkbox" ${modelControlsDisabled||!st.models.length?"disabled":""}>全选</label>
             <label class="model-sort" for="dwTestDepth"><span>测试</span><select id="dwTestDepth" aria-label="测试深度" title="连通：只验证能否调通（1 次请求）&#10;标准：验证能否正常使用，含流式与多轮（3 次）&#10;深度：再验证工具调用、JSON 与长上下文（6 次）">
               <option value="ping" ${settings.testDepth==="ping"?"selected":""}>连通</option>
               <option value="basic" ${settings.testDepth==="basic"?"selected":""}>标准</option>
               <option value="deep" ${settings.testDepth==="deep"?"selected":""}>深度</option>
             </select></label>
-            <button type="button" class="btn sm" id="dwToggleSelection" ${modelControlsDisabled?"disabled":""} title="${selectedCount ? "清空当前选择" : "选择全部模型"}" aria-label="${selectedCount ? "清空当前选择" : "选择全部模型"}">${selectedCount ? "清空已选" : "全选"}</button>
             <button type="button" class="btn primary sm" id="dwBatch" data-controls-disabled="${modelControlsDisabled?"true":"false"}" ${batchDisabled?"disabled":""} aria-busy="${batchBusy?"true":"false"}" title="${batchBusy?"正在批量测试选中的模型":selectedCount?"按「"+depthLabel+"」档测试选中的模型":"请先选择要测试的模型"}">${batchBusy?SPINNER_ICON+"批量测试中…":"测试选中"}</button>
           </div>
         </div>
@@ -3379,7 +3372,6 @@ function bindDetail(c, st){
   const proxySetup=c.querySelector("#dwProxySetup"); if(proxySetup) proxySetup.onclick=openSettings;
   const bal=c.querySelector("#dwBal"); if(bal && !bal.disabled) bal.onclick=()=>fetchBalance(id);
   const fet=c.querySelector("#dwFetch"); if(fet && !fet.disabled) fet.onclick=()=>fetchModels(id);
-  const sort=c.querySelector("#dwModelSort"); if(sort && !sort.disabled) sort.onchange=()=>setModelSort(sort.value);
   const depth=c.querySelector("#dwTestDepth"); if(depth && !depth.disabled) depth.onchange=()=>setTestDepth(depth.value);
   // 批量按钮初始会因“未选择模型”而禁用；仍需预先绑定，勾选后动态启用才能正常触发。
   const bat=c.querySelector("#dwBatch"); if(bat) bat.onclick=()=>batchTest(id);
@@ -3392,17 +3384,16 @@ function bindDetail(c, st){
       updateSelectionCount(c, st);
     };
   });
-  const selectionToggle=c.querySelector("#dwToggleSelection");
-  if(selectionToggle && !selectionToggle.disabled) selectionToggle.onclick=()=>{
-    // 只按当前站点可见模型判断，避免旧列表 ID 残留时把“全选/清空”语义弄反。
-    const visibleSelectedCount=st.models.reduce((count,model)=>count+(selectedModels.has(model.id)?1:0),0);
-    const selectAll=st.models.length>0 && visibleSelectedCount===0;
-    // 选择集只保存当前站点当前列表的模型，模型列表更新后不保留失效 ID。
+  // 三态主勾选框：未勾/半选时点击=全选，全选时点击=清空（原生点击会自动把 indeterminate 变为 checked）。
+  const selectAllBox=c.querySelector("#dwSelectAll");
+  if(selectAllBox && !selectAllBox.disabled) selectAllBox.onchange=()=>{
+    // 只作用于当前列表；选择集只保存当前站点当前列表的模型，模型列表更新后不保留失效 ID。
+    const turnOn=selectAllBox.checked;
     selectedModels.clear();
     c.querySelectorAll("#dwModels input").forEach(ch=>{
-      ch.checked=selectAll;
-      if(selectAll) selectedModels.add(ch.dataset.m);
-      ch.closest(".model")?.classList.toggle("selected",selectAll);
+      ch.checked=turnOn;
+      if(turnOn) selectedModels.add(ch.dataset.m);
+      ch.closest(".model")?.classList.toggle("selected",turnOn);
     });
     rememberCurrentModelSelection();
     updateSelectionCount(c, st);
@@ -3410,6 +3401,8 @@ function bindDetail(c, st){
   c.querySelectorAll("[data-model-test]").forEach(button=>{
     if(!button.disabled) button.onclick=()=>testModel(id, button.dataset.modelTest);
   });
+  // 首次渲染也要同步一次：恢复的选择可能是部分选中，半选态必须靠 JS 设置 indeterminate。
+  updateSelectionCount(c, st);
   bindApiKeyControls(c);
   c.querySelectorAll("[data-copy]").forEach(b=> b.onclick=()=>copyText(b.dataset.copy));
   const back=c.querySelector("#dwBack"); if(back) back.onclick=closeFocus;
@@ -3418,12 +3411,16 @@ function updateSelectionCount(container, st){
   const count=st.models.reduce((total,model)=>total+(selectedModels.has(model.id)?1:0),0);
   const label=container.querySelector(".selection-count");
   if(label) label.textContent="已选 " + count + " · 并发 " + settings.concurrency;
-  const selectionToggle=container.querySelector("#dwToggleSelection");
-  if(selectionToggle){
-    const clearSelection=count>0;
-    selectionToggle.textContent=clearSelection ? "清空已选" : "全选";
-    selectionToggle.title=clearSelection ? "清空当前选择" : "选择全部模型";
-    selectionToggle.setAttribute("aria-label",selectionToggle.title);
+  const selectAllBox=container.querySelector("#dwSelectAll");
+  if(selectAllBox){
+    // 三态：全部勾选=checked，部分=indeterminate，无=空；半选态属性无法写进 HTML，只能在这里同步。
+    const allSelected=st.models.length>0 && count===st.models.length;
+    selectAllBox.checked=allSelected;
+    selectAllBox.indeterminate=count>0 && !allSelected;
+    const title=allSelected ? "清空当前选择" : "选择全部模型";
+    const host=selectAllBox.closest("label") || selectAllBox;
+    host.title=title;
+    selectAllBox.setAttribute("aria-label",title);
   }
   const batch=container.querySelector("#dwBatch");
   if(batch){
@@ -3668,6 +3665,7 @@ function exportJSON(){
     group:st.group,
     note:st.note,
     balancePath:st.balancePath,
+    headers:st.headers,
     order:st.order,
     status:st.status,
     models:st.models
@@ -3823,8 +3821,7 @@ function openSettings(){
 function saveSettingsModal(){
   const settingsSnapshot=JSON.stringify(settings);
   applySettings({
-    // 排序与测试档位属于详情栏里的即时选择，设置窗口不提供改动项时必须保留当前值。
-    modelSort: settings.modelSort,
+    // 测试档位属于详情栏里的即时选择，设置窗口不提供改动项时必须保留当前值。
     testDepth: settings.testDepth,
     theme: document.getElementById("s_theme").value,
     proxy: document.getElementById("s_proxy").value,
