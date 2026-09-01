@@ -8,3 +8,5 @@ design/
 session-out.json
 *.crx
 *.pem
+.obsidian/
+*.log
