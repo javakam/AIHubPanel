@@ -18,6 +18,6 @@
 ## 代码结构
 - server.mjs：静态托管 + /api/proxy 同源转发，SSRF 防护逻辑都集中在这个文件
 - public/index.html：页面骨架
-- public/app.js：前端全部逻辑；探测、测试、渲染都在这里，存储读写集中在 load 和 persist 开头的函数
+- public/app.js：前端全部逻辑；探测、测试、渲染都在这里，存储读写集中在 load/save 开头的函数（app.js:269、405、409、415、432）
 - public/app.css：样式
 - start-aihubpanel.bat：Windows 一键启动
