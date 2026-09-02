@@ -1,0 +1,3 @@
+# cmd.exe mis-parses LF-only .bat files: compound statements such as
+# `for /f ... do set` break. Force CRLF on checkout regardless of core.autocrlf.
+*.bat text eol=crlf
