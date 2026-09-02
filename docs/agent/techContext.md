@@ -18,7 +18,7 @@
 ## 代码结构
 - server.mjs：静态托管 + /api/proxy 同源转发，SSRF 防护逻辑都集中在这个文件（桌面版原样复用，不改）
 - public/index.html：页面骨架
-- public/app.js：前端全部逻辑；探测、测试、渲染都在这里，存储读写集中在 load/save 开头的函数（app.js:269、405、409、415、432）
+- public/app.js：前端全部逻辑；探测、测试、渲染都在这里，存储读写集中在 load/save 开头的 5 个函数（具体行号见 prompt.md）
 - public/app.css：样式
 - start-aihubpanel.bat：Windows 一键启动（网页版）
 - prompt.md：桌面版施工手册（架构、里程碑、坑、红线）

@@ -12,7 +12,7 @@
 
 ## 2026-09-02 SSE 流式命门查证结论【已确认】
 - 结论：SSE 流式只有一条路能走通——独立本地 HTTP 服务 + WebView 直接加载 http://127.0.0.1，此时 SSE 是标准浏览器行为，逐块读取天然正常。
-- 三条「内嵌转发」路线全部整体缓冲、SSE 必断流：Tauri 自定义协议（响应体是 Cow<'static,[u8]> 整块 buffer）、Wails asset server（contentTypeSniffer 未实现 http.Flusher）、WebView2 WebResourceRequested 拦截（原生 IStream 被缓冲）。
+- 三条「内嵌转发」路线全部整体缓冲、SSE 必断流：Tauri 自定义协议（响应体是 Cow<'static,[u8]>，整块 buffer，必须一次把响应全给完、没法边生成边发）、Wails asset server（ResponseWriter 不支持 http.Flusher，缓冲刷不出去）、WebView2 WebResourceRequested 拦截（原生 IStream 被缓冲）。
 - 来源互相印证：Tauri #12557、Wails #2847、WebView2Feedback #3519。因此选型核心不是「哪个框架能流式」，而是「哪个框架做『纯壳 + 加载外部 URL』最干净」。
 - 现有 Node 版本身就是「本地 HTTP 服务 + response.body.getReader() 逐块转发」，与这条唯一可行路线完全吻合，壳只负责开窗加载即可。
 
@@ -23,9 +23,7 @@
 - 用户拍板（2026-09-02）：选 Electron。前端和转发逻辑一行不动，SSE 天然正常，对 AI 写代码风险最低；代价只有磁盘体积。
 
 ## 2026-09-02 Electron 定稿 + 存储桥设计【已确认】
-- 架构：Electron 主进程选空闲端口 → 用 ELECTRON_RUN_AS_NODE=1 spawn 现有 server.mjs → BrowserWindow 加载 127.0.0.1；preload 用 contextBridge 暴露同步存储桥 window.aihubStore。
-- 存储桥：前端 5 个存储函数（load/save/saveSettings/loadUIState/saveUIState）检测到 window.aihubStore 就走它（Node fs 同步读写 config.json），否则继续 localStorage 兜底，网页版不回归。
-- 修正旧条目「服务端加两个接口」的写法：不用 server.mjs 加接口，改用 preload 同步桥。因为 load() 在 app.js:4348 是同步调用，改成 fetch 会牵动启动流程和几十处 save()/saveSettings() 返回值的检查，改动面大、风险高；同步桥让这 5 个函数保持同步，调用点零改动。
-- 里程碑：0 最小可跑（SSE 验证）；1 存储切换；2 打包 exe；3 迁移与回归。详见 prompt.md。
+- 定稿：Electron 主进程 spawn 现有 server.mjs 当子进程，BrowserWindow 加载 127.0.0.1；preload 用 contextBridge 暴露同步存储桥 window.aihubStore。施工细节见 prompt.md。
+- 关键决策：数据从 localStorage 迁到 config.json 时，不在 server.mjs 加读写接口，改由 preload 同步桥直接读写文件。因为前端 load()（app.js:4348）是同步调用，改成 fetch 会牵动启动流程和几十处 save()/saveSettings() 返回值检查；同步桥让 5 个存储函数保持同步、调用点零改动，网页版留 localStorage 兜底不回归。
 
 新条目往下追加，旧条目不改。经确认后删除【待确认】标记。
