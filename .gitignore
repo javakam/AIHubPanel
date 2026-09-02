@@ -10,3 +10,9 @@ session-out.json
 *.pem
 .obsidian/
 *.log
+
+# Electron 桌面版
+node_modules/
+electron/dist/
+electron/release/
+config.json

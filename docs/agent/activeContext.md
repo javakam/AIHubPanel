@@ -1,19 +1,18 @@
 # 当前状态
 
 ## 正在做什么
-- 桌面 exe 化：方案已定（Go 单文件 exe + WebView2 壳 + 明文 config.json，理由见 decisions.md，尚未确认）。确认后从里程碑 0 开工。
+- 桌面 exe 化：方案定稿为 Electron（2026-09-02 用户拍板），开工准备已完成，即将从里程碑 0 开工。
 
 ## 最近完成
-- 2026-09-02：exe 化调研完成：GitHub 上没有现成轮子，Electron/Tauri/Wails 均有硬伤，最终选 Go + WebView2。
-- 2026-09-02：搭好这套协作工作流（AGENTS.md 和 docs/agent/）。
+- 2026-09-02：exe 化选型定稿 Electron（推翻此前的 go-webview2，见 decisions.md）。
+- 2026-09-02：写好了 prompt.md 施工手册（架构、里程碑、坑、红线），并同步了 docs/agent 工作流文件。
 
 ## 下一步
-- [ ] 确认方案：用户把 decisions.md 里的【待确认】删掉
-- [ ] 里程碑 0：Go 起 SSE echo 服务 + WebView2 窗口，验证 exe 里流式转发可行。成败在此一举：go-webview2 不行就换 Wails 壳，业务代码不受影响
-- [ ] 里程碑 1：静态资源嵌入 exe，config.json 明文读写，前端存储从 localStorage 换成文件接口
-- [ ] 里程碑 2：server.mjs 的转发逻辑移植成 Go，用 mock 桩做双跑对比
-- [ ] 里程碑 3：图标、单实例锁、打包单 exe
-- [ ] 数据迁移：浏览器版导出 JSON，桌面版导入一次
+- [ ] 里程碑 0：Electron 最小可跑（spawn server.mjs + BrowserWindow 加载 127.0.0.1，SSE 流式验证）
+- [ ] 里程碑 1：preload 存储桥 + config.json 明文读写 + 前端 5 个存储函数切换
+- [ ] 里程碑 2：electron-builder 打包 exe（asarUnpack、图标、单实例锁）
+- [ ] 里程碑 3：数据迁移 + mock 桩双跑回归
+- 详细施工说明、坑和红线都在 prompt.md。
 
 ## 备注
 - 桌面版做出来之前，日常仍然用 start-aihubpanel.bat 启动网页版，一切照旧。

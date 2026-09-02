@@ -1,11 +1,11 @@
 # 决策记录
 
-## 2026-09-02 桌面 exe 方案：Go 单文件 exe + WebView2 壳【待确认】
+## 2026-09-02 桌面 exe 方案：Go 单文件 exe + WebView2 壳【已否决】
 - 原因：要轻量单文件（约 10MB），前端一行不改；转发层用 Go 标准库 net/http，AI 语料熟、go build 秒级反馈，改起来快；WebView2 是系统自带组件，SSE 流式行为和浏览器一致。
 - 代价：转发逻辑要从 JS 移植成 Go，需拿 Node 版当参照做回归验证；窗口壳库 go-webview2 只有约 325 星、偏小众，但查证它是 Wails 在 Windows 的底层绑定、2026-02 仍在更新，README 并未声明不面向独立使用，写对一次后冻结不动。
 - 备选方案：Electron（约 100MB，不满足轻量，但零移植、改动最小）；Tauri v2（自定义协议 register_uri_scheme_protocol 的响应体是整体缓冲，SSE 必断流，必须走 sidecar+加载外部 URL，引入 Rust 后变两套语言）；Wails v2（asset server 不支持 http.Flusher，issue 2847 查实未修复，需另起独立 HTTP 服务绕开）。
 
-## 2026-09-02 数据从 localStorage 改为 exe 同目录明文 config.json【待确认】
+## 2026-09-02 数据从 localStorage 改为 exe 同目录明文 config.json【已确认】
 - 原因：用户要求数据不放浏览器里，要随时能直接打开查看和手工编辑；桌面应用也顺手。
 - 代价：前端几个读写函数改成接口调用，服务端加两个接口；浏览器版要导出 JSON 再导入一次做迁移。
 - 备选方案：保留 localStorage（不行，桌面版的内嵌浏览器存储和系统浏览器本来就是两套，数据必然搬家）；SQLite（用户不要数据库）。
@@ -16,11 +16,16 @@
 - 来源互相印证：Tauri #12557、Wails #2847、WebView2Feedback #3519。因此选型核心不是「哪个框架能流式」，而是「哪个框架做『纯壳 + 加载外部 URL』最干净」。
 - 现有 Node 版本身就是「本地 HTTP 服务 + response.body.getReader() 逐块转发」，与这条唯一可行路线完全吻合，壳只负责开窗加载即可。
 
-## 2026-09-02 桌面壳二次评估：推翻 go-webview2，改为 Electron 或 Tauri【待确认】
+## 2026-09-02 桌面壳二次评估：推翻 go-webview2，改为 Electron【已确认】
 - 推翻理由：go-webview2 仅约 325 星、单点维护，属野库，不满足「主流、官方维护」的硬要求；上一轮为追「磁盘轻量」选了它，是捡芝麻丢西瓜。
 - 关键新事实：所有 WebView 壳方案（Electron/Tauri/Wails）运行时内存都在约 300MB（都跑 Chromium/WebView2），「轻量」只体现在磁盘体积（Tauri 约 3MB vs Electron 约 100MB 安装包），不体现在内存。
 - 两个真正主流候选：Electron（122k 星、OpenJS 官方、零改动、Node 语料最丰富、磁盘约 100MB）；Tauri + Go sidecar（110k 星、官方、磁盘约 15MB、但转发层要移植成 Go，有同场景先例 oyg123less/sub2api-desktop）。
-- 推荐 Electron：主进程拉起现有 server.mjs + BrowserWindow 加载 127.0.0.1，前端和转发逻辑一行不动，SSE 天然正常，对 AI 写代码风险最低；代价只有磁盘体积。
-- 备选 Tauri + Go sidecar：仅在「磁盘体积是硬指标」时选，需移植约 250 行 SSRF 转发逻辑并做回归。
+- 用户拍板（2026-09-02）：选 Electron。前端和转发逻辑一行不动，SSE 天然正常，对 AI 写代码风险最低；代价只有磁盘体积。
+
+## 2026-09-02 Electron 定稿 + 存储桥设计【已确认】
+- 架构：Electron 主进程选空闲端口 → 用 ELECTRON_RUN_AS_NODE=1 spawn 现有 server.mjs → BrowserWindow 加载 127.0.0.1；preload 用 contextBridge 暴露同步存储桥 window.aihubStore。
+- 存储桥：前端 5 个存储函数（load/save/saveSettings/loadUIState/saveUIState）检测到 window.aihubStore 就走它（Node fs 同步读写 config.json），否则继续 localStorage 兜底，网页版不回归。
+- 修正旧条目「服务端加两个接口」的写法：不用 server.mjs 加接口，改用 preload 同步桥。因为 load() 在 app.js:4348 是同步调用，改成 fetch 会牵动启动流程和几十处 save()/saveSettings() 返回值的检查，改动面大、风险高；同步桥让这 5 个函数保持同步，调用点零改动。
+- 里程碑：0 最小可跑（SSE 验证）；1 存储切换；2 打包 exe；3 迁移与回归。详见 prompt.md。
 
 新条目往下追加，旧条目不改。经确认后删除【待确认】标记。
