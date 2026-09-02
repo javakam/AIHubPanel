@@ -25,7 +25,7 @@
 
 ## .bat 文件的两个编码坑
 - **bat 正文必须纯 ASCII**。cmd.exe 按系统代码页（本机 GBK）读取 .bat，UTF-8 的中文注释会被拆成乱码并吃掉后续行——实测表现为 `'1' 不是内部或外部命令`、变量整段变空。中文说明写在本文件里，bat 里只留英文注释
-- **换行必须 CRLF**。LF 结尾的 bat 在 `for /f ... do set` 这类复合语句上会解析错乱
+- **换行必须 CRLF**。LF 结尾的 bat 在 `for /f ... do set` 这类复合语句上会解析错乱。仓库根的 .gitattributes 已用 `*.bat text eol=crlf` 固定住，不再依赖各人的 core.autocrlf
 - server.mjs 的启动横幅是 UTF-8，所以 bat 开头 `chcp 65001` 把控制台切到 UTF-8，否则中文输出是乱码
 
 ## 关键依赖
@@ -38,7 +38,8 @@
 - 启动面板一律用 start-aihubpanel.bat（可见窗口、4398 端口），不后台起服务
 - 桌面版数据文件：exe 同目录的 config.json，明文，结构是 stations / settings / uiState 三个字段。开发态（`npm start`）落在仓库根目录，已 gitignore。便携 exe 下这个「同目录」指用户双击 exe 所在的目录，不是运行时的临时解压目录
 - 本地测试桩（不在仓库内）：E:\goodwork\ZCodeData\aihub-probe\mock-upstream.mjs，端口作为第一个参数传入（8899 已被别的程序占用时改用 8901），可模拟 UA 白名单锁等网关行为；同目录有 stations-backup.json 可恢复数据
-- 桌面版验收工具（同目录，不在仓库内）：inproc-server-check.mjs 验证主进程内起服务；cdp-eval.mjs / cdp-shot.mjs 通过 `--remote-debugging-port=9223` 在窗口里执行表达式和截图
+- 本地 mock 测不了 UA 自动治愈：它是回环地址，而 server.mjs 的转发只放行公网目标，回环会被判 blocked_target。要验证 UA 真的写到了上游，得用公网回显服务（httpbin.org/headers、postman-echo.com/headers 会把收到的头回显；api.github.com/rate_limit 没有 UA 直接 403，补了就 200）
+- 桌面版验收工具（同目录，不在仓库内）：inproc-server-check.mjs 验证主进程内起服务；cdp-eval.mjs / cdp-shot.mjs 通过 `--remote-debugging-port=9223` 在窗口里执行表达式和截图；cdp-download.mjs 触发下载并等落盘（`Browser.setDownloadBehavior` 的 allowAndName 会把文件存成 GUID 名）；cdp-setfile.mjs 给 `<input type=file>` 塞文件（`DOM.setFileInputFiles` 不会触发 change，要手工补派发一个冒泡的 change 事件）；m3-dual.mjs 对 17 个 mock 模型跑同一套 testModel 并输出分级；m3-heal.mjs 验证 UA 白名单自动治愈
 
 ## 代码结构
 - server.mjs：静态托管 + /api/proxy 同源转发，SSRF 防护逻辑都集中在这个文件（桌面版原样复用，不改）

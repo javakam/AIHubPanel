@@ -8,13 +8,15 @@
 - 开工准备：prompt.md 施工手册已就绪，含架构、里程碑、坑与红线
 - 协作工作流文件搭建（AGENTS.md 和 docs/agent/）
 - 桌面 exe 化里程碑 0/1/2：Electron 最小可跑 → 明文 config.json 存储 → Windows 便携 exe（打包细节见 techContext.md）
+- 桌面 exe 化里程碑 3：网页版导出 JSON 导入桌面版，站点/设置/模型记录全在；mock 桩下 17 个模型两侧分级完全一致；UA 白名单自动治愈两侧行为一致
+- 修复 start-aihubpanel.bat：4398 落在 Windows 保留端口段导致启动静默失败，改为启动前试绑 + 自动退备用端口（细节见 techContext.md）
 
 ## 待办
 - [x] 确认 exe 化方案（2026-09-02 用户拍板 Electron）
 - [x] 里程碑 0：Electron 最小可跑（主进程内 import server.mjs + 窗口加载，SSE 流式已验证）
 - [x] 里程碑 1：preload 存储桥 + config.json 明文读写 + 前端存储切换
 - [x] 里程碑 2：electron-builder 打包 exe（asarUnpack、图标、单实例锁）
-- [ ] 里程碑 3：数据迁移（浏览器导出→桌面导入）+ mock 桩双跑回归
+- [x] 里程碑 3：数据迁移（浏览器导出→桌面导入）+ mock 桩双跑回归
 - [ ] （可选后续）SmartScreen 签名、WebView2 缺失引导等打磨
 
 ## 已知问题
@@ -23,6 +25,7 @@
 - config.json 含 API Key，必须 gitignore，绝不提交进仓库。
 - Node 版保留作参照实现：桌面版复用它同一个 server.mjs，转发行为天然一致，但改动转发逻辑时仍需双跑对比。
 - 装依赖时 electron 的二进制要另外拉约 150MB，默认源国内基本拉不动；镜像已固定在 .npmrc，换机器装不上先查这里。
-- 桌面版的 User-Agent 里带 `aihubpanel-desktop/0.1.0` 和 `Electron/44.1.1`，和浏览器不同。按 UA 白名单放行的网关可能因此变脸，里程碑 3 双跑时要专门核对。
-- 桌面版和网页版的数据是两份：桌面读写 config.json，浏览器读写 localStorage，同一台机器上互不同步。要搬数据只能走导出/导入（里程碑 3）。
+- 桌面版的 User-Agent 里带 `aihubpanel-desktop/0.1.0` 和 `Electron/44.1.1`，和浏览器不同。里程碑 3 已双跑核对：17 个 mock 模型分级零差异，UA 自动治愈两侧都成功并写入同样的站点头，所以 UA 差异目前没有造成行为分叉；但改动转发或探测逻辑时仍要重跑这套对比
+- 桌面版和网页版的数据是两份：桌面读写 config.json，浏览器读写 localStorage，同一台机器上互不同步。要搬数据只能走导出/导入（已在里程碑 3 实测走通）
 - portable 包运行时会把自己解压到临时目录，所以配置目录取的是 `PORTABLE_EXECUTABLE_DIR`（electron/main.js:57）。已实测确认：进程跑在 `%TEMP%\<随机名>\AIHubPanel.exe`，而 config.json 落在用户双击的那个 exe 旁边。
+- 网页版数据按「协议+地址+端口」隔离在浏览器 localStorage 里。start-aihubpanel.bat 退到备用端口时，面板会是空的——老数据没丢，只是在新地址看不到，要搬得走导出/导入。想固定住 4398 见 techContext.md 的 netsh 办法

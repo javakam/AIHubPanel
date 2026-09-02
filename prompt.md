@@ -110,19 +110,27 @@ config.json 结构（明文，对应 3 个 key）：
 
 打包踩的两个坑：Windows 权限级别的键名是 `requestedExecutionLevel`（少个 ed 就报「configuration.win should be one of these: null」，完全看不出错在哪）；`electronDist` 指到 node_modules/electron/dist 才不会重新下那 150MB 的 electron。都记在 techContext.md。
 
-### 里程碑 3：迁移与回归
+### 里程碑 3：迁移与回归【已完成 2026-09-02】
 
 - 数据迁移：复用现有「导出 / 导入」功能，浏览器版导出 JSON → 桌面版导入一次。
 - 回归：用本地 mock 桩（8899，见 techContext.md）双跑对比，确认转发行为一致、SSE 一致、UA 白名单自动治愈仍生效。
 
 **验收**：迁移后站点、设置、模型测试记录都在；mock 桩下网页版和桌面版行为一致。
 
+迁移是走真实界面做的，两侧都没有绕过 UI：网页版（Chrome，临时实例 8123）用站点表单加了两个指向 mock 桩的站，跑完连通诊断和模型测试，然后点真实的导出按钮，拿到一份 9,935 字节的备份（format `aihubpanel.stations`、schemaVersion 1、version 3、18 个模型、7 项设置、密钥明文）。把这个文件原样喂给已打包桌面 exe 的真实导入入口，结果 3 个站全部还原，包括密钥、分组、备注、自定义头 `{"User-Agent":"claude-cli/2.0.0 (external, cli)"}`、18 个模型缓存，连之前测出的连通结果（在线、9.6ms）都在。exe 同目录的 config.json 从 948 字节长到 9,925 字节，三个顶层字段 stations / uiState / settings 齐全。
+
+回归对比跑的是同一套 17 个 mock 模型（覆盖空回复、模型名不符、不支持流式、丢上下文、报错、UA 锁、只输出思考、o1 形状、不返 token、偶发失败、只吃 x-api-key、legacy 文本补全等形状），两侧各跑一遍完整 testModel，逐模型比对 ok / grade / depth / 四个探针状态 / 是否有指标：**17 个模型零差异**。分级结果：可用 11 个（good、notool、nojson、truncctx、reason-budget、reason-only、o1-shape、notoken、flaky、xkey，加 good 本身）、受限 4 个（swap 判身份不符、nostream 和 legacy-text 判流式失败、noctx 判上下文丢失）、不可用 3 个（empty、err、ua-lock）。桌面版这些结果也确认原样落进了 config.json，17 个模型的分级和运行时一致。
+
+UA 白名单自动治愈单独验了一次，因为本地 mock 测不到它：mock 在回环地址上，而转发只放行公网目标，回环会被判 blocked_target，重试必然走不通。改用公网回显服务后两侧结果完全一致——入站那个 401「unauthorized client」是脚本合成的（真实网关无法复现），其余每一步都是真的：正则命中、代理健康检查通过、经本地转发补 UA 重试拿到 200、UA 固化进站点头、`transport` 记为 builtin、日志写下一条「自动修复」。上游回显确认收到的正是 `claude-cli/2.0.0 (external, cli)`，且控制头 `x-aihub-extra-headers` 没有泄漏给目标站点。
+
+顺带修掉一个一直存在但没被发现的启动故障：start-aihubpanel.bat 硬编码的 4398 落在 Windows 的保留端口段里，bind 直接 EACCES，双击后窗口一闪就没。详情和 .bat 的两个编码坑记在 techContext.md。
+
 ## 六、必须避开的坑
 
 1. **preload 用不了 fs 的根因是 sandbox**：Electron 20+ 默认 `sandbox: true`，preload 只能 require 少量模块。要 `sandbox: false` 才能在 preload 里 `require('fs')`。
 2. **preload 拿不到 app 对象**：`app.getPath` 只在主进程可用。config.json 的目录要用 `additionalArguments` 从主进程传给 preload，别在 preload 里直接 require('electron').app。
 3. **asar 里的 .mjs 和 public 目录**：`import()` 读不了 asar 里的 .mjs，server.mjs 又要按自身位置去找 public/。打包时用 `asarUnpack` 把这两样解出来，路径最稳。
-4. **端口冲突**：用户可能同时开着网页版（bat 用 4398）。桌面版自己选空闲端口，别写死。
+4. **端口冲突**：用户可能同时开着网页版（bat 首选 4398）。桌面版自己选空闲端口，别写死。另外 Windows 会成片保留 TCP 端口，写死的端口可能根本绑不上（见 techContext.md 的「Windows 保留端口段」）。
 5. **config.json 写不进去**：exe 若装在 Program Files 等只读目录，exe 同目录写文件会失败。写入失败要给出提示，别静默丢数据。
 6. **同步写文件别卡界面**：`saveUIState()` 高频触发（选中、切视图都写），stations 可能含大量模型测试记录。同步 `writeFileSync` 写大 JSON 会卡几十毫秒，可接受但要留意，必要时对 saveUIState 做去抖。
 7. **别继承外部的 AI_HUB_ALLOWED_ORIGIN**：用户环境里若设过它，server.mjs 的同源校验就只认那个 origin，窗口自己的请求会被一律拒掉。启动前删掉这个变量。
