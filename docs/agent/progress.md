@@ -11,7 +11,7 @@
 ## 待办
 - [x] 确认 exe 化方案（2026-09-02 用户拍板 Electron）
 - [x] 里程碑 0：Electron 最小可跑（主进程内 import server.mjs + 窗口加载，SSE 流式已验证）
-- [ ] 里程碑 1：preload 存储桥 + config.json 明文读写 + 前端存储切换
+- [x] 里程碑 1：preload 存储桥 + config.json 明文读写 + 前端存储切换
 - [ ] 里程碑 2：electron-builder 打包 exe（asarUnpack、图标、单实例锁）
 - [ ] 里程碑 3：数据迁移（浏览器导出→桌面导入）+ mock 桩双跑回归
 - [ ] （可选后续）SmartScreen 签名、WebView2 缺失引导等打磨
@@ -23,3 +23,5 @@
 - Node 版保留作参照实现：桌面版复用它同一个 server.mjs，转发行为天然一致，但改动转发逻辑时仍需双跑对比。
 - 装依赖时 electron 的二进制要另外拉约 150MB，默认源国内基本拉不动；镜像已固定在 .npmrc，换机器装不上先查这里。
 - 桌面版的 User-Agent 里带 `aihubpanel-desktop/0.1.0` 和 `Electron/44.1.1`，和浏览器不同。按 UA 白名单放行的网关可能因此变脸，里程碑 3 双跑时要专门核对。
+- 桌面版和网页版的数据是两份：桌面读写 config.json，浏览器读写 localStorage，同一台机器上互不同步。要搬数据只能走导出/导入（里程碑 3）。
+- portable 包运行时会把自己解压到临时目录，所以配置目录取的是 `PORTABLE_EXECUTABLE_DIR`（electron/main.js:57）。这条推断还没在真 exe 上验证过，里程碑 2 打完包必须实测一次落盘位置。

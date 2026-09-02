@@ -1,7 +1,8 @@
 "use strict";
 /* =========================================================================
    AIHubPanel · 中转站管理 —— 无构建、零依赖的单页应用
-   数据存浏览器 localStorage；请求优先浏览器直连，CORS 失败时可回退受限同源转发。
+   数据存本地：桌面版写 exe 同目录的明文 config.json，浏览器里写 localStorage；
+   请求优先浏览器直连，CORS 失败时可回退受限同源转发。
    本文件结构：
      1) 常量与默认数据   2) 存储层   3) 工具函数   4) 网络层（连通/余额/模型/批量）
      5) 健康总览         6) 渲染（列表/网格/详情/专注）  7) 交互（拖拽/选中/表单/删除/导入导出）
@@ -11,8 +12,8 @@
    ========================================================================= */
 
 /* ---------------- 常量与默认数据 ---------------- */
-const LS_STATIONS = "aihub.stations.v2";   // 中转站数组的 localStorage key
-const LS_SETTINGS  = "aihub.settings.v2";  // 设置的 localStorage key
+const LS_STATIONS = "aihub.stations.v2";   // 中转站数组的存储键
+const LS_SETTINGS  = "aihub.settings.v2";  // 设置的存储键
 const LS_UI_STATE   = "aihub.ui.v1";       // 非敏感界面状态（不含 API Key）
 const VERSION = 3;                          // 导出文件版本号
 const EXPORT_FORMAT = "aihubpanel.stations"; // 导出格式标识，避免误把其它项目会话文件当站点备份
@@ -64,7 +65,7 @@ const PROBE_HINTS = Object.freeze({
 });
 const PROBE_STATES = new Set(["pass","fail","skip"]);
 const CAPABILITY_GRADES = new Set(["usable","limited","unusable"]);
-// 单模型能力报告的持久化上限：探针数固定，detail 文本另有 redact 截断，避免 localStorage 被写爆。
+// 单模型能力报告的持久化上限：探针数固定，detail 文本另有 redact 截断，避免存储被写爆。
 const PROBE_DETAIL_MAX = 200;
 // 长上下文填充：默认 4KB，够识别“声明长上下文但实际早早截断”，又不至于单次请求过于昂贵。
 const LONG_CONTEXT_KB_MIN = 1;
@@ -133,7 +134,7 @@ const stationRevisions = new Map();                    // 配置变化后递增�
 const responseTimeouts = new WeakMap();                // AbortController 持续覆盖到响应体读取完成
 const responseTransports = new WeakMap();              // Response 实际使用的请求通道（不写入响应体）
 let modalTrigger = null;                               // 关闭弹窗后恢复焦点
-// API Key 的完整显示只存在于当前页面会话，绝不写入 localStorage；默认始终为半隐私显示。
+// API Key 的完整显示只存在于当前页面会话，绝不写入本地存储；默认始终为半隐私显示。
 const revealedApiKeyIds = new Set();
 // 表单使用内存中的原始值；输入框在半隐私态只承载掩码文本，避免把完整值留在静态 DOM 属性中。
 let formApiKeyValue = "";
@@ -268,7 +269,7 @@ function normalizeStations(list){
 // 加载本地数据：优先读 stations；无数据或解析失败则植入默认站
 function load(){
   try{
-    const raw = localStorage.getItem(LS_STATIONS);
+    const raw = readStored(LS_STATIONS);
     // 仅在首次没有 key 时植入默认站；合法空数组代表用户主动删空，必须保留。
     if(raw === null) seedDefault();
     else {
@@ -277,13 +278,13 @@ function load(){
       stations = normalizeStations(arr);
     }
   }catch(e){
-    // 不回写损坏原值，避免一次读取异常就覆盖用户尚可恢复的 localStorage 数据。
+    // 不回写损坏原值，避免一次读取异常就覆盖用户尚可恢复的本地数据。
     console.warn("读取中转站数据失败，当前会话使用默认站", e);
     seedDefault(false);
   }
 
   // 只接受白名单字段及合法范围，避免导入或损坏缓存污染运行时状态。
-  try{ settings = normalizeSettings(JSON.parse(localStorage.getItem(LS_SETTINGS) || "null")); }
+  try{ settings = normalizeSettings(JSON.parse(readStored(LS_SETTINGS) || "null")); }
   catch(e){ settings = { ...DEFAULT_SETTINGS }; }
   loadUIState();
 }
@@ -390,24 +391,32 @@ function seedDefault(persist=true){
 // 故按 4 秒去重弹一次红色提示；调用方仍负责关键结构性操作的显式回滚。
 let warnPersistenceAt = 0;
 const PERSISTENCE_WARNINGS = Object.freeze({
-  stations:"站点数据写入浏览器存储失败（可能已满或被禁用），本次改动未保存，建议导出备份后清理",
-  settings:"设置写入浏览器存储失败（可能已满或被禁用），本次改动未保存，建议导出备份后清理",
-  ui:"界面状态写入浏览器存储失败（可能已满或被禁用），选择与视图位置不会被记住"
+  stations:"站点数据写入本地存储失败（可能已满、只读或被禁用），本次改动未保存，建议导出备份后清理",
+  settings:"设置写入本地存储失败（可能已满、只读或被禁用），本次改动未保存，建议导出备份后清理",
+  ui:"界面状态写入本地存储失败（可能已满、只读或被禁用），选择与视图位置不会被记住"
 });
 function warnPersistence(kind){
   const now = Date.now();
   if(now - warnPersistenceAt < 4000) return;
   warnPersistenceAt = now;
-  toast(PERSISTENCE_WARNINGS[kind] || "浏览器存储写入失败（可能已满或被禁用），改动未持久化，建议导出备份后清理", "err");
+  toast(PERSISTENCE_WARNINGS[kind] || "本地存储写入失败（可能已满、只读或被禁用），改动未持久化，建议导出备份后清理", "err");
 }
+
+// 存储后端：桌面版由 preload 挂上 window.aihubStore，读写 exe 同目录的明文 config.json；
+// 浏览器里没有这座桥，继续用 localStorage。两者取值约定一致（缺项返回 null），
+// 所以下面 5 个函数只是把 localStorage 换成 storage()，读写逻辑和调用点都不变。
+function storage(){ return window.aihubStore || window.localStorage; }
+function readStored(key){ return storage().getItem(key); }
+function writeStored(key, value){ storage().setItem(key, value); }
+
 
 // 持久化：仅写 stations / settings 两个 key
 function save(){
-  try{ localStorage.setItem(LS_STATIONS, JSON.stringify(stations)); return true; }
+  try{ writeStored(LS_STATIONS, JSON.stringify(stations)); return true; }
   catch(e){ console.warn("保存中转站数据失败", e); warnPersistence("stations"); return false; }
 }
 function saveSettings(){
-  try{ localStorage.setItem(LS_SETTINGS, JSON.stringify(settings)); return true; }
+  try{ writeStored(LS_SETTINGS, JSON.stringify(settings)); return true; }
   catch(e){ console.warn("保存设置失败", e); warnPersistence("settings"); return false; }
 }
 
@@ -415,7 +424,7 @@ function saveSettings(){
 function loadUIState(){
   selectedModelsByStation = new Map();
   try{
-    const raw = JSON.parse(localStorage.getItem(LS_UI_STATE) || "null");
+    const raw = JSON.parse(readStored(LS_UI_STATE) || "null");
     if(!raw || typeof raw !== "object" || Array.isArray(raw)) return;
     if(typeof raw.selectedStationId === "string" && getById(raw.selectedStationId)) selectedId = raw.selectedStationId;
     const groups = raw.selectedModelsByStation;
@@ -437,7 +446,7 @@ function saveUIState(){
     selectedModelsByStation.forEach((models,id)=>{
       if(getById(id) && Array.isArray(models) && models.length) selectedModelsOut[id] = models.slice(0,2000);
     });
-    localStorage.setItem(LS_UI_STATE, JSON.stringify({ selectedStationId, selectedModelsByStation:selectedModelsOut }));
+    writeStored(LS_UI_STATE, JSON.stringify({ selectedStationId, selectedModelsByStation:selectedModelsOut }));
     return true;
   }catch(e){ console.warn("保存界面状态失败", e); warnPersistence("ui"); return false; }
 }
@@ -3826,7 +3835,7 @@ function saveForm(){
     if(!persisted){
       // 还原单站字段；invalidate/resetStationRuntime 产生的运行时标记对用户不可见，无需回退。
       Object.assign(st, JSON.parse(stationSnapshot));
-      toast("保存失败：浏览器存储不可用（已满或被禁用），请先导出备份再清理空间","err");
+      toast("保存失败：本地存储不可用（已满、只读或被禁用），请先导出备份再清理空间","err");
       return;   // 不关弹窗、不渲染，让用户看到错误并决定如何处理
     }
     toast("已保存修改","ok");
@@ -3837,7 +3846,7 @@ function saveForm(){
     persisted=save();
     if(!persisted){
       stations=JSON.parse(stationsSnapshot);   // 弹出刚 push 的站点，内存与磁盘保持一致
-      toast("保存失败：浏览器存储不可用（已满或被禁用），请先导出备份再清理空间","err");
+      toast("保存失败：本地存储不可用（已满、只读或被禁用），请先导出备份再清理空间","err");
       return;
     }
     toast("已添加「"+name+"」","ok");
@@ -3881,7 +3890,7 @@ function doDelete(){
     stations=JSON.parse(stationsSnapshot);
     selectedId=prevSelectedId; focusId=prevFocusId; focusReturnScroll=prevFocusReturnScroll; focusReturnStationId=prevFocusReturnStationId;
     deletingId=null;
-    toast("删除失败：浏览器存储不可用（已满或被禁用），请先导出备份再清理空间","err");
+    toast("删除失败：本地存储不可用（已满、只读或被禁用），请先导出备份再清理空间","err");
     return;
   }
   deletingId=null;
@@ -4017,7 +4026,7 @@ function importJSON(file){
         selectedModels.clear();
         restoreModelSelection(selectedId);
         applyTheme(); updateThemeBtn(); render();
-        throw new Error("浏览器存储不可用（已满或被禁用），导入已回滚，请先清理空间再重试");
+        throw new Error("本地存储不可用（已满、只读或被禁用），导入已回滚，请先清理空间再重试");
       }
       render();
       const duplicateText=duplicateNotes.length ? "；"+duplicateNotes.slice(0,4).join("；")+(duplicateNotes.length>4?`；另有 ${duplicateNotes.length-4} 个重复项` : "") : "";
@@ -4071,7 +4080,7 @@ function saveSettingsModal(){
   if(!dataOk || !settingsOk){
     settings=normalizeSettings(JSON.parse(settingsSnapshot));
     applyTheme(); updateThemeBtn(); render();
-    toast("设置保存失败：浏览器存储不可用（已满或被禁用），请先导出备份再清理空间","err");
+    toast("设置保存失败：本地存储不可用（已满、只读或被禁用），请先导出备份再清理空间","err");
     return;
   }
   render(); hideModal("setModal");

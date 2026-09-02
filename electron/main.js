@@ -49,6 +49,15 @@ function probeHealth(port) {
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+// config.json 放 exe 同目录，用户打开程序所在文件夹就能看到、随手改。
+// portable 包运行时会把自己解压到临时目录，app.getPath("exe") 指的是那个临时副本，
+// 只有 PORTABLE_EXECUTABLE_DIR 才是用户看到的 exe 位置。
+// 开发态（npm start）的 exe 在 node_modules 里，配置写那儿等于丢文件，所以退回仓库根目录。
+function configDir() {
+  if (process.env.PORTABLE_EXECUTABLE_DIR) return process.env.PORTABLE_EXECUTABLE_DIR;
+  return app.isPackaged ? path.dirname(app.getPath("exe")) : path.join(__dirname, "..");
+}
+
 // server.mjs 只用 Node 内置模块，而主进程本身就是完整的 Node 环境，
 // 所以直接 import 进来即可，不必再开一个子进程：省一份运行时内存，
 // 也不会在异常退出时留下占着端口的孤儿进程。
@@ -85,6 +94,11 @@ function createWindow(port) {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      // preload 要用 fs 同步读写 config.json，sandbox 开着就 require 不到。
+      sandbox: false,
+      preload: path.join(__dirname, "preload.js"),
+      // preload 拿不到 app 对象，配置目录只能从主进程传过去。
+      additionalArguments: [`--aihub-config-dir=${configDir()}`],
       spellcheck: false
     }
   });

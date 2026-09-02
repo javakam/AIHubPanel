@@ -25,15 +25,18 @@
 
 | 函数 | 位置 | 干什么 |
 | --- | --- | --- |
-| `load()` | app.js:269 | 启动读站点(271)、设置(286) |
-| `save()` | app.js:405 | 写站点(406) |
-| `saveSettings()` | app.js:409 | 写设置(410) |
-| `loadUIState()` | app.js:415 | 读界面状态(418) |
-| `saveUIState()` | app.js:432 | 写界面状态(440) |
+| `load()` | app.js:270 | 启动读站点(272)、设置(287) |
+| `save()` | app.js:414 | 写站点(415) |
+| `saveSettings()` | app.js:418 | 写设置(419) |
+| `loadUIState()` | app.js:424 | 读界面状态(427) |
+| `saveUIState()` | app.js:441 | 写界面状态(449) |
 
 3 个 key：`aihub.stations.v2`（站点数组，含 API Key）、`aihub.settings.v2`（设置）、`aihub.ui.v1`（非敏感界面状态）。
 
 **重要**：调用这 5 个函数的地方有几十处，但改造时只改函数内部实现，调用点一个都不用动。
+
+实际改法（里程碑 1 已落地）：新增 `storage()`（app.js:408）挑后端——有 `window.aihubStore` 就用它，否则用 localStorage；`readStored` / `writeStored` 是两个薄封装。5 个函数只是把 `localStorage.getItem/setItem` 换成这两个封装，逻辑一行没变。
+
 
 ### 网络层（一行不动）
 
@@ -81,13 +84,17 @@ config.json 结构（明文，对应 3 个 key）：
 
 实测结果：窗口 1386×864 正常渲染，服务在随机端口（如 8836）起来用了 19ms；mock 桩 `good-model` 单测通过，SSE 读到 11 个分块、每块间隔约 62ms（桩的发送节奏就是 60ms），首字 63ms；本地转发 + 自定义请求头合并对 api.github.com 返回 200。
 
-### 里程碑 1：存储切换
+### 里程碑 1：存储切换【已完成 2026-09-02】
 
 - preload.js 里用 Node fs 同步读写 config.json，`contextBridge.exposeInMainWorld` 暴露 `getItem(key)` / `setItem(key, value)`。
 - config.json 路径从主进程传进来（用 `webPreferences.additionalArguments` 传目录，preload 里从 `process.argv` 读）。
 - 前端 5 个存储函数加环境判断：有 `window.aihubStore` 走文件，没有走 localStorage。
 
 **验收**：桌面版添加一个站点，关闭重开数据还在；打开 exe 同目录的 config.json 能看到明文站点和设置；用浏览器打开同一份网页版，数据互不影响。
+
+实测结果：桥挂上后 `window.aihubStore` 只有 getItem / setItem 两个方法。用界面表单加一个站，关掉重开，站名、密钥、分组、自定义请求头全在；config.json 明文可读，stations / settings / uiState 三个字段齐全。手工改文件里的备注、再让程序写一次设置，手工改动没被覆盖。浏览器打开 4398 的网页版仍走 localStorage，操作前后 config.json 的 sha256 一字未变。写入耗时：uiState 约 0.9ms，站点数据约 3.4ms；造 10 站 × 40 模型带完整报告和日志（约 504KB）后单次 save 约 18ms。把 config.json 设成只读再存，`save()` 返回 false 并弹红字提示，文件没被改坏，也没留下 .tmp 残渣。
+
+三处比原计划多做的事，都是实测暴露出来的：写入用「临时文件 + 改名」，避免写一半断电留下半截 JSON（改名被占用时退回直接覆写）；每次读取先比 mtime 和大小，用户手工改过就重读，不拿旧缓存去覆盖；界面提示里的「浏览器存储」全改成「本地存储」，桌面版没有浏览器存储可言。
 
 ### 里程碑 2：打包
 
