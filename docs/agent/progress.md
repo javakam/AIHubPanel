@@ -16,7 +16,7 @@
 - [ ] 数据迁移：浏览器 localStorage → config.json
 
 ## 已知问题
-- go-webview2 偏小众（Wails 组织自用库，声明不面向独立使用），能否胜任由里程碑 0 决定，替代方案是换 Wails 壳。
+- go-webview2 偏小众（约 325 星，查证为 Wails 在 Windows 的底层绑定、README 未声明不面向独立使用、2026-02 仍在更新），能否胜任由里程碑 0 决定，替代方案是换 Wails 壳。
 - 打包后的 exe 首次运行会弹 SmartScreen"未知发布者"，自用点继续即可；要发给别人才需要买代码签名证书。
 - 少数系统没装 WebView2 Runtime（常见于 LTSC/Server 版），桌面版起不来时需要给出提示和下载指引。
 - Node 版保留作参照实现：转发行为一旦改动，两边都要改并重跑对比。
