@@ -96,13 +96,19 @@ config.json 结构（明文，对应 3 个 key）：
 
 三处比原计划多做的事，都是实测暴露出来的：写入用「临时文件 + 改名」，避免写一半断电留下半截 JSON（改名被占用时退回直接覆写）；每次读取先比 mtime 和大小，用户手工改过就重读，不拿旧缓存去覆盖；界面提示里的「浏览器存储」全改成「本地存储」，桌面版没有浏览器存储可言。
 
-### 里程碑 2：打包
+### 里程碑 2：打包【已完成 2026-09-02】
 
 - 用 electron-builder 打成 Windows 便携 exe（portable）或安装包。
 - `asarUnpack` 把 server.mjs 和 public/ 解出 asar：`import()` 一个 asar 里的 .mjs 会失败，静态文件也要真实存在。
 - 图标、单实例锁、应用名。
 
 **验收**：拿到一个独立 exe，拷到没装 Node 的机器（或换个目录）双击能开、能测、能存。
+
+实测结果：`npm run dist` 产出单文件便携 exe 约 101MB（另有免解压直跑的 win-unpacked 目录约 321MB）。把这个 exe 单独拷进一个干净空目录运行：窗口正常打开（随机端口 7757），存储桥在位，用界面表单加了一个指向 mock 桩的站——明文密钥、自定义请求头、分组全部写进 config.json；连通性 11.7ms、拉到 18 个模型、`good-model` 单测判为可用且 SSE 指标齐全（首字 74.3ms、总耗时 698.8ms、14.31 tok/s）；`/api/proxy/health` 返回 200 带 `X-AIHub-Proxy: 1`，说明 server.mjs 从 asar.unpacked 里跑起来了。
+
+配置落盘位置这次是量出来的，不再是推断：进程实际跑在 `%TEMP%\<随机名>\AIHubPanel.exe`（portable 包自解压的位置，退出即删），而 config.json 生成在用户双击的那个 exe 旁边。也就是 `app.getPath("exe")` 指向临时副本，只有 `PORTABLE_EXECUTABLE_DIR` 才是用户看得见的目录。
+
+打包踩的两个坑：Windows 权限级别的键名是 `requestedExecutionLevel`（少个 ed 就报「configuration.win should be one of these: null」，完全看不出错在哪）；`electronDist` 指到 node_modules/electron/dist 才不会重新下那 150MB 的 electron。都记在 techContext.md。
 
 ### 里程碑 3：迁移与回归
 

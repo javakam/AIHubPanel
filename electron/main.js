@@ -89,6 +89,8 @@ function createWindow(port) {
     minWidth: 960,
     minHeight: 600,
     title: "AIHubPanel",
+    // 打包后的 exe 自带图标资源，开发态（npm start）不指定就会显示 Electron 默认图标。
+    icon: path.join(__dirname, "icon.png"),
     backgroundColor: "#f5f6f8",
     show: false,
     webPreferences: {

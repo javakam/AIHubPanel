@@ -38,4 +38,14 @@
 - key 白名单：桥只认那 3 个存储 key（electron/preload.js:11），其余一概拒绝，防止这座桥变成任意文件的读写通道。
 - 附带的措辞调整：几处面向用户的提示从「浏览器存储」改成「本地存储」，桌面版写的是文件，原措辞会误导。
 
+## 2026-09-02 打包只出便携单文件 exe，不做安装包【待确认】
+- 决定：electron-builder 的 target 只留 `portable`，产出一个 AIHubPanel-0.1.0-portable.exe，不做 NSIS 安装包。
+- 原因：这是自用的本地工具，用户要的是「拷到哪儿都能跑、数据就在 exe 旁边」。安装包会把程序装进 Program Files，那是只读目录，config.json 反而写不进去，等于把里程碑 1 的明文文件存储又搞复杂了。便携版天然满足「随时打开 config.json 手工编辑」。
+- 代价：便携 exe 每次启动都要自解压到临时目录，冷启动比目录版慢一点；进程路径看着在 %TEMP%，容易让人误以为数据也在临时目录。真要免解压可以直接用 electron/release/win-unpacked/ 那个目录版。
+
+## 2026-09-02 electronDist 复用本地已下载的 electron【待确认】
+- 决定：build 配置里加 `electronDist: node_modules/electron/dist`。
+- 原因：electron-builder 默认会自己去下载对应版本的 electron zip（约 150MB），国内源基本拉不动，而 `npm install` 时那份二进制已经躺在 node_modules 里了。指过去直接拷，打包从「大概率失败」变成稳定几十秒完成。
+- 代价：打包机器必须先 `npm install` 成功；node_modules 里的 electron 版本和 package.json 里的 devDependency 版本必须一致，换版本时别只改 package.json 不重装。
+
 新条目往下追加，旧条目不改。经确认后删除【待确认】标记。

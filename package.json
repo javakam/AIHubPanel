@@ -3,11 +3,50 @@
   "version": "0.1.0",
   "private": true,
   "description": "AIHubPanel 桌面版：Electron 壳 + 复用现有 server.mjs",
+  "author": "AIHubPanel",
   "main": "electron/main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "dist": "electron-builder --win portable"
   },
   "devDependencies": {
-    "electron": "44.1.1"
+    "electron": "44.1.1",
+    "electron-builder": "26.16.0"
+  },
+  "build": {
+    "appId": "com.aihubpanel.desktop",
+    "productName": "AIHubPanel",
+    "copyright": "AIHubPanel",
+    "directories": {
+      "output": "electron/release"
+    },
+    "files": [
+      "package.json",
+      "electron/main.js",
+      "electron/preload.js",
+      "electron/icon.png",
+      "server.mjs",
+      "public/**/*"
+    ],
+    "asarUnpack": [
+      "server.mjs",
+      "public/**/*"
+    ],
+    "electronDist": "node_modules/electron/dist",
+    "electronLanguages": [
+      "en-US",
+      "zh-CN"
+    ],
+    "npmRebuild": false,
+    "win": {
+      "icon": "electron/icon.ico",
+      "requestedExecutionLevel": "asInvoker",
+      "target": [
+        "portable"
+      ]
+    },
+    "portable": {
+      "artifactName": "AIHubPanel-${version}-portable.exe"
+    }
   }
 }
