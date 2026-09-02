@@ -48,4 +48,9 @@
 - 原因：electron-builder 默认会自己去下载对应版本的 electron zip（约 150MB），国内源基本拉不动，而 `npm install` 时那份二进制已经躺在 node_modules 里了。指过去直接拷，打包从「大概率失败」变成稳定几十秒完成。
 - 代价：打包机器必须先 `npm install` 成功；node_modules 里的 electron 版本和 package.json 里的 devDependency 版本必须一致，换版本时别只改 package.json 不重装。
 
+## 2026-09-02 start-aihubpanel.bat 改为启动前试绑端口并自动退备用【待确认】
+- 决定：bat 不再硬编码 4398 直接启动，而是先用 PowerShell 的 TcpListener 依次试绑 4398 / 4700 / 5100 / 7788 / 9345 / 18080，选中第一个真能绑的传给 server.mjs；一个都绑不上就报错并提示怎么查保留段。
+- 原因：4398 落在本机 Windows 的保留端口段 4311-4410 里（server.mjs 的默认 4179 也落在 4103-4202 里），bind 直接 EACCES。node 报完错就退出，窗口一闪而过，用户看到的是「双击了没反应」，完全无从下手。保留段由 Hyper-V/WSL/Docker 在开机时申请，位置每次重启都可能变，所以不能换一个固定端口了事——必须运行时探。
+- 代价：换端口等于换一份浏览器 localStorage，面板会是空的。这一点没法在代码层面消除（同源策略如此），所以退备用时会在窗口里明确说明「老数据没丢，只是这个地址看不到，用导出/导入搬过去」，并给出用 netsh 长期占住 4398 的命令。另外 bat 正文必须保持纯 ASCII、CRLF 换行，否则 cmd 按 GBK 解析会错乱（细节在 techContext.md）。
+
 新条目往下追加，旧条目不改。经确认后删除【待确认】标记。

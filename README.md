@@ -18,7 +18,9 @@
 node server.mjs
 ```
 
-默认监听 `http://127.0.0.1:4179`。Windows 下也可以双击 `start-aihubpanel.bat`，它会自动打开浏览器。
+默认监听 `http://127.0.0.1:4179`。Windows 下也可以双击 `start-aihubpanel.bat`，它会挑一个真正能用的端口、启动服务并自动打开浏览器。
+
+如果启动报 `listen EACCES: permission denied`，说明这个端口被 Windows 整段预留了（Hyper-V / WSL / Docker 开机时申请，`netsh int ipv4 show excludedportrange protocol=tcp` 可以看到有哪些段）。换一个 `AI_HUB_PORT` 就行，bat 已经会自动换。注意面板数据存在浏览器 localStorage 里、按端口隔离，换端口后面板是空的——原有站点没丢，用面板的导出/导入搬过去即可。
 
 几个环境变量可以调：
 
