@@ -26,4 +26,10 @@
 - 定稿：Electron 主进程 spawn 现有 server.mjs 当子进程，BrowserWindow 加载 127.0.0.1；preload 用 contextBridge 暴露同步存储桥 window.aihubStore。施工细节见 prompt.md。
 - 关键决策：数据从 localStorage 迁到 config.json 时，不在 server.mjs 加读写接口，改由 preload 同步桥直接读写文件。因为前端 load()（app.js:4348）是同步调用，改成 fetch 会牵动启动流程和几十处 save()/saveSettings() 返回值检查；同步桥让 5 个存储函数保持同步、调用点零改动，网页版留 localStorage 兜底不回归。
 
+## 2026-09-02 server.mjs 在主进程内 import，不另起子进程【待确认】
+- 原来的打算是用 `ELECTRON_RUN_AS_NODE=1` spawn 一个子进程跑 server.mjs。改成在主进程里 `import()` 它。
+- 原因：Electron 主进程本身就是完整的 Node 环境，server.mjs 只用内置模块，直接 import 就能跑；少一份 Node 运行时内存，也不会在主进程异常退出时留下占着端口的孤儿进程。它在模块顶层读 `AI_HUB_PORT` 并 listen，所以只要先把端口写进 `process.env` 再 import，效果和子进程完全一样。配置不合法时它直接抛错，在主进程里能原样拿到错误信息，比从子进程 stderr 里捞更准。
+- 代价：server.mjs 崩了会连带主进程；但它只用内置模块、逻辑冻结不动，风险可接受。打包时仍必须 `asarUnpack` server.mjs，因为 `import()` 读不了 asar 里的 .mjs。
+- 附带发现：拼接子进程命令行的写法会被安全扫描判为命令注入，import 方案顺带绕开了这个问题。
+
 新条目往下追加，旧条目不改。经确认后删除【待确认】标记。

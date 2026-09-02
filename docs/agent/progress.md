@@ -10,7 +10,7 @@
 
 ## 待办
 - [x] 确认 exe 化方案（2026-09-02 用户拍板 Electron）
-- [ ] 里程碑 0：Electron 最小可跑（spawn server.mjs + 窗口加载，SSE 流式验证）
+- [x] 里程碑 0：Electron 最小可跑（主进程内 import server.mjs + 窗口加载，SSE 流式已验证）
 - [ ] 里程碑 1：preload 存储桥 + config.json 明文读写 + 前端存储切换
 - [ ] 里程碑 2：electron-builder 打包 exe（asarUnpack、图标、单实例锁）
 - [ ] 里程碑 3：数据迁移（浏览器导出→桌面导入）+ mock 桩双跑回归
@@ -21,3 +21,5 @@
 - 打包后的 exe 首次运行会弹 SmartScreen「未知发布者」，自用点继续即可；要发给别人才需要买代码签名证书。
 - config.json 含 API Key，必须 gitignore，绝不提交进仓库。
 - Node 版保留作参照实现：桌面版复用它同一个 server.mjs，转发行为天然一致，但改动转发逻辑时仍需双跑对比。
+- 装依赖时 electron 的二进制要另外拉约 150MB，默认源国内基本拉不动；镜像已固定在 .npmrc，换机器装不上先查这里。
+- 桌面版的 User-Agent 里带 `aihubpanel-desktop/0.1.0` 和 `Electron/44.1.1`，和浏览器不同。按 UA 白名单放行的网关可能因此变脸，里程碑 3 双跑时要专门核对。

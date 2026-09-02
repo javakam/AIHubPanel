@@ -41,7 +41,7 @@
 
 ### server.mjs（一行不动）
 
-它只干两件事：静态托管 public/、受限同源转发（含整套 SSRF 防护）。桌面版用 `ELECTRON_RUN_AS_NODE=1` 让 Electron 的可执行文件以 Node 模式把它当子进程跑起来，代码零改动。
+它只干两件事：静态托管 public/、受限同源转发（含整套 SSRF 防护）。它在模块顶层就读 `AI_HUB_PORT` / `AI_HUB_HOST` 并 `listen`，所以桌面版只要先把端口写进 `process.env`、再 `import()` 它，服务就在主进程里跑起来了，代码零改动。
 
 ## 四、最终架构
 
@@ -49,8 +49,8 @@
 Electron 主进程（main.js）
  ├─ 单实例锁：防止开两个实例抢 config.json
  ├─ 选一个空闲端口（避免和正在跑的网页版冲突）
- ├─ spawn server.mjs 子进程（ELECTRON_RUN_AS_NODE，AI_HUB_PORT=选好的端口）
- ├─ 等端口就绪 → 创建 BrowserWindow 加载 http://127.0.0.1:<端口>
+ ├─ 把端口写进 process.env，再 import server.mjs（主进程本身就是 Node，不必另起子进程）
+ ├─ 轮询 /api/proxy/health 确认就绪 → 创建 BrowserWindow 加载 http://127.0.0.1:<端口>
  └─ preload.js 通过 contextBridge 暴露一个同步存储桥 window.aihubStore
         └─ 内部用 Node 的 fs 同步读写 exe 同目录的 config.json
 ```
@@ -69,16 +69,17 @@ config.json 结构（明文，对应 3 个 key）：
 
 ## 五、里程碑（按顺序，逐段验收）
 
-### 里程碑 0：Electron 最小可跑（路线验证）
+### 里程碑 0：Electron 最小可跑（路线验证）【已完成 2026-09-02】
 
 只验证「这条路整体通不通」，不做存储改造。
 
 - 建 `electron/` 目录，写 main.js + preload.js + package.json。
-- main.js：单实例锁 → 选空闲端口 → spawn server.mjs → 窗口加载 127.0.0.1。
-- 窗口安全配置：`contextIsolation: true`、`nodeIntegration: false`、`sandbox: false`（sandbox 关掉才能让 preload 用 fs）。
-- 用 `ELECTRON_RUN_AS_NODE=1` 跑 server.mjs，`AI_HUB_PORT` 传选好的端口。
+- main.js：单实例锁 → 选空闲端口 → 写 `process.env.AI_HUB_PORT` → `import` server.mjs → 轮询健康检查 → 窗口加载 127.0.0.1。
+- 窗口安全配置：`contextIsolation: true`、`nodeIntegration: false`；里程碑 1 加 preload 时还要 `sandbox: false`（sandbox 关掉才能让 preload 用 fs）。
 
-**验收**：`npm run start` 能打开窗口，页面正常显示；点一次模型测试，SSE 流式能逐字出来，首字延迟正常。
+**验收**：`npm start` 能打开窗口，页面正常显示；点一次模型测试，SSE 流式能逐字出来，首字延迟正常。
+
+实测结果：窗口 1386×864 正常渲染，服务在随机端口（如 8836）起来用了 19ms；mock 桩 `good-model` 单测通过，SSE 读到 11 个分块、每块间隔约 62ms（桩的发送节奏就是 60ms），首字 63ms；本地转发 + 自定义请求头合并对 api.github.com 返回 200。
 
 ### 里程碑 1：存储切换
 
@@ -91,7 +92,7 @@ config.json 结构（明文，对应 3 个 key）：
 ### 里程碑 2：打包
 
 - 用 electron-builder 打成 Windows 便携 exe（portable）或安装包。
-- `asarUnpack` 把 server.mjs 和 public/ 解出 asar，确保子进程能读、能 spawn。
+- `asarUnpack` 把 server.mjs 和 public/ 解出 asar：`import()` 一个 asar 里的 .mjs 会失败，静态文件也要真实存在。
 - 图标、单实例锁、应用名。
 
 **验收**：拿到一个独立 exe，拷到没装 Node 的机器（或换个目录）双击能开、能测、能存。
@@ -107,10 +108,12 @@ config.json 结构（明文，对应 3 个 key）：
 
 1. **preload 用不了 fs 的根因是 sandbox**：Electron 20+ 默认 `sandbox: true`，preload 只能 require 少量模块。要 `sandbox: false` 才能在 preload 里 `require('fs')`。
 2. **preload 拿不到 app 对象**：`app.getPath` 只在主进程可用。config.json 的目录要用 `additionalArguments` 从主进程传给 preload，别在 preload 里直接 require('electron').app。
-3. **asar 里的 .mjs 和 public 目录**：子进程 spawn server.mjs、读 public 静态文件，都在 asar 里容易出路径问题。打包时用 `asarUnpack` 解出来，路径最稳。
+3. **asar 里的 .mjs 和 public 目录**：`import()` 读不了 asar 里的 .mjs，server.mjs 又要按自身位置去找 public/。打包时用 `asarUnpack` 把这两样解出来，路径最稳。
 4. **端口冲突**：用户可能同时开着网页版（bat 用 4398）。桌面版自己选空闲端口，别写死。
 5. **config.json 写不进去**：exe 若装在 Program Files 等只读目录，exe 同目录写文件会失败。写入失败要给出提示，别静默丢数据。
 6. **同步写文件别卡界面**：`saveUIState()` 高频触发（选中、切视图都写），stations 可能含大量模型测试记录。同步 `writeFileSync` 写大 JSON 会卡几十毫秒，可接受但要留意，必要时对 saveUIState 做去抖。
+7. **别继承外部的 AI_HUB_ALLOWED_ORIGIN**：用户环境里若设过它，server.mjs 的同源校验就只认那个 origin，窗口自己的请求会被一律拒掉。启动前删掉这个变量。
+8. **Electron 二进制要单独下**：npm 包里只有壳，装完还要拉约 150MB 的 zip，默认源国内基本拉不动。仓库根的 `.npmrc` 已把镜像固定到 npmmirror。
 
 ## 七、红线（不要动的东西）
 
