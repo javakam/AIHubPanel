@@ -16,4 +16,11 @@
 - 来源互相印证：Tauri #12557、Wails #2847、WebView2Feedback #3519。因此选型核心不是「哪个框架能流式」，而是「哪个框架做『纯壳 + 加载外部 URL』最干净」。
 - 现有 Node 版本身就是「本地 HTTP 服务 + response.body.getReader() 逐块转发」，与这条唯一可行路线完全吻合，壳只负责开窗加载即可。
 
+## 2026-09-02 桌面壳二次评估：推翻 go-webview2，改为 Electron 或 Tauri【待确认】
+- 推翻理由：go-webview2 仅约 325 星、单点维护，属野库，不满足「主流、官方维护」的硬要求；上一轮为追「磁盘轻量」选了它，是捡芝麻丢西瓜。
+- 关键新事实：所有 WebView 壳方案（Electron/Tauri/Wails）运行时内存都在约 300MB（都跑 Chromium/WebView2），「轻量」只体现在磁盘体积（Tauri 约 3MB vs Electron 约 100MB 安装包），不体现在内存。
+- 两个真正主流候选：Electron（122k 星、OpenJS 官方、零改动、Node 语料最丰富、磁盘约 100MB）；Tauri + Go sidecar（110k 星、官方、磁盘约 15MB、但转发层要移植成 Go，有同场景先例 oyg123less/sub2api-desktop）。
+- 推荐 Electron：主进程拉起现有 server.mjs + BrowserWindow 加载 127.0.0.1，前端和转发逻辑一行不动，SSE 天然正常，对 AI 写代码风险最低；代价只有磁盘体积。
+- 备选 Tauri + Go sidecar：仅在「磁盘体积是硬指标」时选，需移植约 250 行 SSRF 转发逻辑并做回归。
+
 新条目往下追加，旧条目不改。经确认后删除【待确认】标记。

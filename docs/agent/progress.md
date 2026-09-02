@@ -14,6 +14,7 @@
 - [ ] 里程碑 2：转发层 Go 移植、回归对比
 - [ ] 里程碑 3：图标、单实例锁、打包单 exe
 - [ ] 数据迁移：浏览器 localStorage → config.json
+- [ ] 二次评估：改推 Electron（推翻 go-webview2），待用户确认后重排里程碑
 
 ## 已知问题
 - go-webview2 偏小众（约 325 星，查证为 Wails 在 Windows 的底层绑定、README 未声明不面向独立使用、2026-02 仍在更新），能否胜任由里程碑 0 决定，替代方案是换 Wails 壳。
