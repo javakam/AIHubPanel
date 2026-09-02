@@ -40,7 +40,7 @@
 
 ### 网络层（一行不动）
 
-`fetchWithTimeout`、`readSseStream`（app.js:1304）、`checkLocalProxy`（app.js:1161）全部走 server.mjs 的相对路径 `/api/proxy`、`/api/proxy/health`。Electron 的渲染进程里这些照常工作，SSE 逐块读取 `response.body.getReader()`（app.js:1307）天然正常。
+`fetchWithTimeout`、`readSseStream`（app.js:1313）、`checkLocalProxy`（app.js:1170）全部走 server.mjs 的相对路径 `/api/proxy`、`/api/proxy/health`。Electron 的渲染进程里这些照常工作，SSE 逐块读取 `response.body.getReader()`（app.js:1316）天然正常。
 
 ### server.mjs（一行不动）
 
