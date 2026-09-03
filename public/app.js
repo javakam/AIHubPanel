@@ -2665,9 +2665,23 @@ function modelDisplayOrder(st){
     const known=new Set(previous.ids);
     indexed.forEach(entry=>{ if(!known.has(entry.model.id)) moved.push(entry); });
     moved.sort(compareModelDisplay);
+    // 插入位置和「停在原位」必须用同一把尺子：留在队列里的卡片按各自排序键排定
+    // （测试中的卡片用的是它上一次的键），插入若按实时状态比，测试中卡片的实时延迟
+    // 是空，新落地的卡片会被插到它错误的一侧，错误顺序还会被下一次快照固化。
+    const rank=new Map(Array.from(keys,([id,key])=>{
+      const parts=key.split(":");
+      return [id,{ tier:Number(parts[0]), lat:parts[1]==="-" ? Infinity : Number(parts[1]) }];
+    }));
+    const compareByRank=(a,b)=>{
+      const ra=rank.get(a.model.id), rb=rank.get(b.model.id);
+      const tier=ra.tier-rb.tier;
+      if(tier) return tier;
+      if(ra.lat!==rb.lat) return ra.lat-rb.lat;
+      return a.index-b.index;
+    };
     moved.forEach(entry=>{
       let at=ordered.length;
-      for(let i=0;i<ordered.length;i++){ if(compareModelDisplay(entry,ordered[i]) < 0){ at=i; break; } }
+      for(let i=0;i<ordered.length;i++){ if(compareByRank(entry,ordered[i]) < 0){ at=i; break; } }
       ordered.splice(at,0,entry);
     });
   }else{
