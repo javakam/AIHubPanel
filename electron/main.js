@@ -9,7 +9,23 @@ const { pathToFileURL } = require("node:url");
 
 const HEALTH_PATH = "/api/proxy/health";
 const READY_TIMEOUT_MS = 15000;
-const READY_POLL_MS = 80;
+// 服务就绪只能靠轮询：server.mjs 在自己模块里 listen，主进程拿不到它的 listening 事件。
+// 间隔小一点，命中前的等待就短一点；一次探测是回环 HTTP，开销可以忽略。
+const READY_POLL_MS = 20;
+// 启动耗时诊断。默认完全关闭，设了 AIHUB_BOOT_TRACE=<文件路径> 才逐段记时间，
+// 用来回答「到底慢在自解压、服务启动还是页面渲染」，不必再改代码重打包。
+// 每行前面是绝对时间戳：便携 exe 自解压那几秒发生在本进程存在之前，
+// 只有拿外部计时器的启动时刻和这里的绝对时间相减才量得出来。
+// 阶段名单独一列且是 ASCII，方便外部脚本按 window-shown 判断「量完了」。
+const TRACE_FILE = process.env.AIHUB_BOOT_TRACE || "";
+const T0 = Date.now();
+function trace(stage, label) {
+  if (!TRACE_FILE) return;
+  try {
+    require("node:fs").appendFileSync(TRACE_FILE, `${Date.now()} +${String(Date.now() - T0).padStart(5)}ms ${stage} ${label}\n`);
+  } catch { /* 诊断写不进去不影响启动 */ }
+}
+trace("main-start", "main.js 开始执行");
 
 let mainWindow = null;
 
@@ -64,6 +80,7 @@ function configDir() {
 // 它在模块加载时就读取环境变量，因此端口必须先写进 process.env。
 async function startServer() {
   const port = await pickFreePort();
+  trace("port-picked", "拿到空闲端口 " + port);
   process.env.AI_HUB_PORT = String(port);
   process.env.AI_HUB_HOST = "127.0.0.1";
   // 用户系统里若设过这个变量，同源校验就只认那个 origin，本窗口的请求会被一律拒掉。
@@ -73,16 +90,17 @@ async function startServer() {
   // server.mjs 在模块顶层就建目录、校验参数并 listen；配置不合法会直接抛，
   // 在这里能原样拿到错误信息，比从子进程的 stderr 里捞更准。
   await import(pathToFileURL(appPath("server.mjs")).href);
+  trace("server-imported", "server.mjs import 完成");
 
   const deadline = Date.now() + READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    if (await probeHealth(port)) return port;
+    if (await probeHealth(port)) { trace("server-ready", "健康检查通过"); return port; }
     await wait(READY_POLL_MS);
   }
   throw new Error(`本地服务在 ${READY_TIMEOUT_MS / 1000} 秒内没有就绪`);
 }
 
-function createWindow(port) {
+function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -105,7 +123,6 @@ function createWindow(port) {
     }
   });
 
-  mainWindow.once("ready-to-show", () => mainWindow.show());
   mainWindow.on("closed", () => { mainWindow = null; });
   // 站点地址等外链交给系统浏览器，不在面板窗口里打开陌生网页。
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -114,7 +131,17 @@ function createWindow(port) {
     } catch { /* 非法 URL 直接忽略 */ }
     return { action: "deny" };
   });
+  trace("window-created", "窗口已创建（尚未加载页面）");
+}
+
+// 窗口建好后才知道端口，这里把加载和「画好了再显示」串起来。
+// ready-to-show 只在这一刻挂：空窗口不导航不会触发它，但先挂上就得多一层
+// 「是不是 about:blank 的首帧」判断，没必要。
+function loadPanel(port) {
+  mainWindow.once("ready-to-show", () => { trace("window-shown", "首帧画好，显示窗口"); mainWindow.show(); });
+  mainWindow.webContents.once("did-finish-load", () => trace("page-loaded", "页面加载完成"));
   void mainWindow.loadURL(`http://127.0.0.1:${port}`);
+  trace("navigation-started", "loadURL 已发出");
 }
 
 // 单实例锁：两个实例会同时读写同一份配置文件，后写的会覆盖前写的。
@@ -128,9 +155,14 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.whenReady().then(async () => {
+    trace("app-ready", "app.whenReady");
     Menu.setApplicationMenu(null);
     try {
-      createWindow(await startServer());
+      // 窗口创建和服务启动互不依赖，原来串着做等于白等一段。
+      // createWindow 同步返回，渲染进程和 GPU 通道的拉起在后台进行，
+      // 正好和端口探测、server.mjs 加载重叠；拿到端口再导航。
+      createWindow();
+      loadPanel(await startServer());
     } catch (error) {
       dialog.showErrorBox("AIHubPanel 启动失败", `本地服务没能启动。\n\n${error instanceof Error ? error.message : String(error)}`);
       app.exit(1);
