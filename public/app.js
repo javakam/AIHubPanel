@@ -117,7 +117,7 @@ let scheduledRenderHandle = null;                      // 合并同一帧内的�
 let selectedModels = new Set();                       // 详情中勾选的「待批量测试」模型 id 集合（唯一真源）
 // 按站点保存模型勾选集合；只写入模型/站点 ID，不会把 API Key 放进 UI 状态。
 let selectedModelsByStation = new Map();
-// 展示顺序快照：测试进行中保持上一次的排序，落地后按新延迟重排。
+// 展示顺序快照：记住上次渲染的顺序和每张卡片的排序键，排序键没变的卡片不许移动。
 const modelDisplaySnapshots = new Map();
 // 原生拖拽期间冻结全量渲染，避免异步请求把正在拖动的 DOM 替换掉。
 let activeDrag = null;
@@ -2590,52 +2590,77 @@ function isModelUsable(model){
   const grade=model.capability && model.capability.grade;
   return grade ? grade==="usable" : model.test==="ok";
 }
-// 模型按「可用性优先、速度其次」展示：可用的按响应速度从快到慢排最前，其次受限（同样按速度），
-// 未测试/测试中按接口返回顺序在后，不可用与失败垫底。
-// 测试进行中沿用上一次的顺序快照，卡片不会在 idle -> testing -> ok/fail 之间跳位；
-// 一轮测试全部落地后重排，新的判定与延迟立即生效。
-function modelSourceSignature(st){
-  return Array.isArray(st && st.models) ? st.models.map(model=>model.id).join("\u0001") : "";
+// 核心项决定这个模型能不能当常规对话模型用：身份被网关偷换、流式坏掉、多轮记不住，
+// 任一项失败都比只缺工具调用/JSON/长上下文严重，因此受限档内据此再分先后。
+const CORE_PROBE_KEYS = new Set(["chat","identity","stream","context"]);
+function hasCoreProbeFailure(model){
+  const cap = model.capability;
+  if(!cap || !Array.isArray(cap.probes)) return false;
+  return cap.probes.some(probe=>probe.state === "fail" && CORE_PROBE_KEYS.has(probe.key));
 }
-function computeModelDisplayOrder(st){
-  const indexed=(st && Array.isArray(st.models) ? st.models : []).map((model,index)=>({ model,index }));
-  const usabilityRank=model=>{
-    const grade=model.capability && model.capability.grade;
-    if(grade==="usable") return 0;
-    if(grade==="limited") return 1;
-    if(grade==="unusable" || model.test==="fail") return 3;
-    if(model.test==="ok") return 0; // 无能力报告的旧数据退回旧口径
-    return 2; // 未测试 / 测试中
-  };
-  indexed.sort((a,b)=>{
-    const rank=usabilityRank(a.model)-usabilityRank(b.model);
-    if(rank) return rank;
-    const aMeasured=Number.isFinite(a.model.latency);
-    const bMeasured=Number.isFinite(b.model.latency);
-    if(aMeasured !== bMeasured) return aMeasured ? -1 : 1;
-    if(aMeasured && a.model.latency !== b.model.latency) return a.model.latency-b.model.latency;
-    return a.index-b.index;
-  });
-  return indexed;
+// 展示分档，数字越小越靠前。已验证坏掉的模型一律排在验证可用的模型之后，
+// 未测试排在已知受限之后、已知不可用之前——「还没测」比「测出来是坏的」更值得先看一眼。
+function modelDisplayTier(model){
+  const grade = model.capability && model.capability.grade;
+  if(grade === "usable") return 0;
+  if(grade === "limited") return hasCoreProbeFailure(model) ? 2 : 1;
+  if(grade === "unusable" || model.test === "fail") return 4;
+  if(model.test === "ok") return 0; // 无能力报告的旧数据退回旧口径，与「复制可用」保持同一判断
+  return 3;                          // 未测试 / 测试中
 }
-// 站点仍有测试在跑（单个、批量或刚领取还未写入 testing）时视为未落地，此期间不重排。
-function isModelOrderSettled(st){
-  if(!st) return true;
-  if(isBatchRunning(st.id) || isManualModelTestRunning(st.id)) return false;
-  return !(Array.isArray(st.models) && st.models.some(model=>model.test === "testing"));
+// 同档内按响应速度从快到慢；没测到延迟的排在本档末尾，同速则保持接口返回顺序。
+function compareModelDisplay(a, b){
+  const tier = modelDisplayTier(a.model) - modelDisplayTier(b.model);
+  if(tier) return tier;
+  const aLat = Number.isFinite(a.model.latency) ? a.model.latency : Infinity;
+  const bLat = Number.isFinite(b.model.latency) ? b.model.latency : Infinity;
+  if(aLat !== bLat) return aLat - bLat;
+  return a.index - b.index;
 }
+// 排序键：只要它不变，卡片就不许动。档位和延迟以外的字段变化（勾选、日志、错误文案）不触发移动。
+function modelOrderKey(model){
+  return modelDisplayTier(model) + ":" + (Number.isFinite(model.latency) ? Math.round(model.latency) : "-");
+}
+// 稳定增量排序。整列重排是「方块跳来跳去」的根源：一轮批测结束时几十张卡片同时换位，
+// 而在那之前列表一直停在测试前的顺序，不可用的照样压在可用的上面。
+// 改成每张卡片只在自己的排序键变化时移动一次：排序键没变的保持原有相对位置，
+// 变了的（刚测完、刚加入）从队列里摘出来，按比较函数插回应在的位置。
+// 保留列表本身有序，插入不破坏有序性，所以任何时刻看到的顺序都是完整正确的顺序，
+// 代价只是每个结果落地时对应的那一张卡片会滑动一次——这次移动有明确的来由，不是无端重排。
 function modelDisplayOrder(st){
   const indexed=(st && Array.isArray(st.models) ? st.models : []).map((model,index)=>({ model,index }));
-  if(!st || !indexed.length) return indexed;
-  const signature=modelSourceSignature(st);
+  if(!st) return indexed;
+  if(!indexed.length){ modelDisplaySnapshots.delete(st.id); return indexed; }
   const previous=modelDisplaySnapshots.get(st.id);
-  if(previous && previous.signature===signature && !isModelOrderSettled(st)){
+  const heldKeys=previous ? previous.keys : null;
+  // 测试中的模型延迟被清空、档位掉回「未测试」，此时用它上一次的排序键，
+  // 免得一次重测把卡片先甩到未测试区再弹回来（同一张卡片来回跳两次）。
+  const keys=new Map(indexed.map(entry=>{
+    const held=heldKeys && heldKeys.get(entry.model.id);
+    return [entry.model.id, entry.model.test === "testing" && held ? held : modelOrderKey(entry.model)];
+  }));
+  let ordered;
+  if(heldKeys && previous.ids.length){
     const byId=new Map(indexed.map(entry=>[entry.model.id,entry]));
-    const ordered=previous.ids.map(id=>byId.get(id)).filter(Boolean);
-    if(ordered.length===indexed.length) return ordered;
+    const moved=[];
+    ordered=[];
+    previous.ids.forEach(id=>{
+      const entry=byId.get(id);
+      if(!entry) return;                                   // 已从列表里消失
+      if(heldKeys.get(id) === keys.get(id)) ordered.push(entry); else moved.push(entry);
+    });
+    const known=new Set(previous.ids);
+    indexed.forEach(entry=>{ if(!known.has(entry.model.id)) moved.push(entry); });
+    moved.sort(compareModelDisplay);
+    moved.forEach(entry=>{
+      let at=ordered.length;
+      for(let i=0;i<ordered.length;i++){ if(compareModelDisplay(entry,ordered[i]) < 0){ at=i; break; } }
+      ordered.splice(at,0,entry);
+    });
+  }else{
+    ordered=indexed.slice().sort(compareModelDisplay);
   }
-  const ordered=computeModelDisplayOrder(st);
-  modelDisplaySnapshots.set(st.id,{ signature, ids:ordered.map(entry=>entry.model.id) });
+  modelDisplaySnapshots.set(st.id,{ ids:ordered.map(entry=>entry.model.id), keys });
   return ordered;
 }
 
@@ -3447,8 +3472,9 @@ function detailHTML(st, isFocus){
   const feedbackHtml=feedback.length ? `<div class="detail-feedback">${feedback.join("")}</div>` : "";
   const displayModels = modelDisplayOrder(st);
   const depthLabel = TEST_DEPTH_LABELS[settings.testDepth] || settings.testDepth;
+  const manualTestsAtCapacity = manualModelTestCount(st.id) >= settings.concurrency;
   const modelsHtml = displayModels.length ? displayModels.map(({model:m,index})=>{
-    const manualAtCapacity = manualModelTestCount(st.id) >= settings.concurrency && m.test!=="testing";
+    const manualAtCapacity = manualTestsAtCapacity && m.test!=="testing";
     const modelTestDisabled = missingConfig || connectionBusy || modelListBusy || batchBusy || m.test==="testing" || manualAtCapacity;
     const selected=selectedModels.has(m.id);
     const visualState=modelVisualState(m);
@@ -3494,7 +3520,7 @@ function detailHTML(st, isFocus){
 
     <div class="sec">
       <div class="model-toolbar">
-        <div class="model-toolbar-heading"><span class="title">模型（${st.models.length}）</span><span class="order-note" title="排序规则：可用的排最前，同档内按响应速度从快到慢；之后依次是受限、未测试、不可用/失败。测试进行中保持原位，一轮测完后统一重排。">可用优先</span><span class="selection-count" title="批量测试并发 ${esc(settings.concurrency)}">已选 ${selectedCount} · 并发 ${esc(settings.concurrency)}</span></div>
+        <div class="model-toolbar-heading"><span class="title">模型（${st.models.length}）</span><span class="order-note" title="排序规则：可用（全部核验通过）→ 受限（只缺工具调用/JSON/长上下文）→ 受限（身份、流式或多轮不通）→ 未测试 → 不可用/失败。同档内响应快的在前，没测出延迟的排在本档末尾。&#10;一张卡片只在自己的判定或延迟变化时移动一次，别的卡片不会跟着重排。">可用优先</span><span class="selection-count" title="批量测试并发 ${esc(settings.concurrency)}">已选 ${selectedCount} · 并发 ${esc(settings.concurrency)}</span></div>
         <div class="model-toolbar-groups">
           <div class="model-tools-group data-tools" role="group" aria-label="模型数据操作">
             <button type="button" class="btn action sm" id="dwFetch" ${modelControlsDisabled?"disabled":""} aria-busy="${modelListBusy?"true":"false"}" title="从当前站点获取模型列表">${modelFetchLabel}</button>
