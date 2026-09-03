@@ -14,6 +14,7 @@
 - 目录版 win-unpacked：双击到窗口显示 0.82 / 0.58 / 0.58 秒。想要快就用它或 zip 版，这是唯一能绕开自解压的办法
 - 应用自身耗时（main.js 开始执行 → 窗口显示）：目录版 0.44-0.62 秒。原来是 1.19 秒，两处改动砍掉一半多：一是窗口创建不再等服务启动（原来 `createWindow(await startServer())` 白等端口探测和 server.mjs 加载，现在先建窗口、拿到端口再 loadURL，见 electron/main.js:164），二是健康检查轮询从 80ms 降到 20ms
 - 前端不是瓶颈：网页版实测 responseEnd 23ms、DOMContentLoaded 87ms、首次内容绘制 76ms
+- 本轮审计还验证了排序插入的边界：测试中卡片的有效键沿用上次快照，插入扫描也必须使用同一份 `keys`，不能拿实时 `latency=null` 的状态比较；相关修复在 public/app.js:2668
 
 
 ## 打包配置要点（package.json 的 build 字段）
