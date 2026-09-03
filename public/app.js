@@ -364,6 +364,9 @@ function normalizeStation(source){
       balanceRaw: status.balanceRaw == null ? null : sanitizeBalanceRaw(status.balanceRaw,apikey),
       balanceError: redactSensitiveText(status.balanceError,apikey,500) || null,
       modelListError: redactSensitiveText(status.modelListError,apikey,500) || null,
+      // 区分「从没拉过列表」和「拉过但站点确实返回空数组」：后者不是失败，
+      // 但也不能只显示「暂无模型，点获取列表」，否则用户会一直重复点同一个按钮。
+      modelListEmpty: status.modelListEmpty === true,
       // null/空值表示从未测试；Number(null) 会得到 0，不能把它误判为有效时间戳。
       lastTest: (typeof status.lastTest === "number" || (typeof status.lastTest === "string" && status.lastTest.trim() !== "")) && Number.isFinite(Number(status.lastTest))
         ? Number(status.lastTest)
@@ -2001,6 +2004,7 @@ async function fetchModelsRequest(id, revision){
       const message=await responseError(response,st.apikey);
       appendRequestLog(st,{ level:"error", kind:"模型列表", method:"GET", endpoint:"/v1/models", status:response.status, latency:performance.now()-requestStarted, transport, message });
       st.status.modelListError=message;
+      st.status.modelListEmpty=false;
       save(); scheduleRender();
       toast("获取模型失败：" + message, "err");
       return;
@@ -2036,16 +2040,25 @@ async function fetchModelsRequest(id, revision){
     }
     modelDisplaySnapshots.delete(id);
     st.status.modelListError=null;
-    appendRequestLog(st,{ level:"ok", kind:"模型列表", method:"GET", endpoint:"/v1/models", status:response.status, latency:performance.now()-requestStarted, transport, message:"获取到 "+st.models.length+" 个模型" });
+    // 站点返回 200 + 空数组：请求本身成功，是这把 Key 所在分组后面没挂渠道。
+    // 这一句必须落到日志和提示里，否则界面只剩「暂无模型」，用户会以为是面板没拉到。
+    const emptyList = st.models.length === 0;
+    st.status.modelListEmpty = emptyList;
+    const countMessage = emptyList ? "站点返回空列表（0 个模型）" : "获取到 " + st.models.length + " 个模型";
+    appendRequestLog(st,{ level: emptyList ? "warn" : "ok", kind:"模型列表", method:"GET", endpoint:"/v1/models", status:response.status, latency:performance.now()-requestStarted, transport, message:countMessage });
     save(); scheduleRender();
-    toast("获取到 " + st.models.length + " 个模型" + (transport === "builtin" ? "，已通过本地同源转发" : ""), "ok");
+    if(emptyList){
+      toast("站点返回空列表：这把 Key 所在分组没有绑定可用渠道", "warn");
+    }else{
+      toast("获取到 " + st.models.length + " 个模型" + (transport === "builtin" ? "，已通过本地同源转发" : ""), "ok");
+    }
   }catch(error){
     if(isCurrentStation(id, revision)){
       const current=getById(id);
       const message=networkErrorMessage(error,st.apikey);
       if(current){
         appendRequestLog(current,{ level:"error", kind:"模型列表", method:"GET", endpoint:"/v1/models", latency:performance.now()-requestStarted, message });
-        current.status.modelListError=message; save(); scheduleRender();
+        current.status.modelListError=message; current.status.modelListEmpty=false; save(); scheduleRender();
       }
       toast("获取模型失败：" + message, "err");
     }
@@ -3506,7 +3519,9 @@ function detailHTML(st, isFocus){
         </div>
       </div>`;
   }).join("")
-    : `<div class="models-empty muted">暂无模型，点「获取列表」拉取。</div>`;
+    : st.status.modelListEmpty
+      ? `<div class="models-empty muted">站点返回了空列表：请求成功（HTTP 200），但 <code>/v1/models</code> 里一个模型都没有。这通常是这把 Key 所在的分组后面没有绑定可用渠道，或渠道全部被禁用。<br>处理办法：到站点后台把渠道绑到该分组，或换一把已绑定渠道的 Key；再点「获取模型列表」确认。</div>`
+      : `<div class="models-empty muted">暂无模型，点「获取模型列表」拉取。</div>`;
 
   return `
     <div class="detail-head">
@@ -3808,7 +3823,7 @@ function openForm(id, options={}){
 }
 function resetStationRuntime(st){
   modelDisplaySnapshots.delete(st.id);
-  st.status = { connectivity:"unknown", latency:null, balance:null, balanceKind:"balance", balanceUnlimited:false, balanceUnit:null, balanceSource:null, balanceNote:null, balanceRaw:null, balanceError:null, modelListError:null, lastTest:null, error:null, transport:null, authMode:"bearer" };
+  st.status = { connectivity:"unknown", latency:null, balance:null, balanceKind:"balance", balanceUnlimited:false, balanceUnit:null, balanceSource:null, balanceNote:null, balanceRaw:null, balanceError:null, modelListError:null, modelListEmpty:false, lastTest:null, error:null, transport:null, authMode:"bearer" };
   st.models = [];
 }
 function saveForm(){

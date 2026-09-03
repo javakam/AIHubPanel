@@ -428,7 +428,8 @@
   button.btn.model-copy:hover:not(:disabled){color:var(--tx); background:var(--sf2); border-color:transparent; box-shadow:none}
   .model-run svg,.model-copy svg{width:16px; height:16px; stroke-width:2.3}
   .model-run .spin{width:15px; height:15px}
-  .models-empty{grid-column:1 / -1; padding:8px; font-size:13px; color:var(--tx)}
+  .models-empty{grid-column:1 / -1; padding:8px; font-size:13px; line-height:1.6; color:var(--tx)}
+  .models-empty code{padding:0 3px; border-radius:4px; background:var(--sf2); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px}
   .request-log-panel{margin-top:12px; overflow:hidden; border:1px solid var(--bd); border-radius:12px; background:var(--sf2)}
   .request-log-head{display:grid; grid-template-columns:auto minmax(0,1fr) 30px; align-items:center; gap:10px; min-height:46px; padding:7px 8px 7px 12px}
   .request-log-heading{display:flex; align-items:baseline; gap:7px; min-width:0; white-space:nowrap}
