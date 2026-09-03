@@ -2,13 +2,13 @@
 
 中转站管理 · 轻量面板。把一堆 API 中转站的余额、连通性、模型列表和模型测试收拢到一个本地面板里，不用再挨个开后台查。
 
-![AIHubPanel 主界面](screenshots/img1.png)
-
 ## 这是什么
 
 同时用好几个 API 中转站（New API、Sub2API 这类 OpenAI 兼容网关）的时候，想看余额、测哪些模型能用、确认 key 还没过期，得分别登录各家后台，来回切很烦。AIHubPanel 就是干这个的：填好 Base URL 和 API Key，连通性、余额、模型目录、单模型和批量模型测试都能在页面上直接点，结果汇总在一起看。
 
 数据全存在浏览器本地（localStorage），不经过任何第三方服务器。请求默认走浏览器自己的网络通道；碰到站点没开 CORS 的情况，可以启动自带的本地服务做同源转发。
+
+也提供了 Windows 桌面版（双击 exe 打开，不开浏览器、不依赖系统 Node），详见 `electron/` 目录和 `prompt.md` 施工手册。
 
 ## 运行
 
@@ -65,8 +65,10 @@ public/
   index.html
   app.js                 前端逻辑（原生 JS，无框架无构建）
   app.css
-screenshots/
-  img1.png
+electron/                Windows 桌面版（Electron）
+  main.js                主进程：选端口、起 server.mjs、开窗口
+  preload.js             存储桥：config.json ↔ 渲染进程
+  icon.png / icon.ico    应用图标
 ```
 
 前端是原生 JavaScript，没有框架、没有构建步骤，改完刷新就能看效果。
