@@ -1,7 +1,7 @@
 # AIHubPanel 当前状态
 
 ## 正在做什么
-项目清理和性能排查都收尾了，等用户下一步指令。
+代码审计完成（后端 clean，前端 3 处 edge-case 问题已定位，待用户决定是否修复）。
 
 ## 最近完成（近三日）
 - **2026-09-03**：性能排查。`AIHUB_BOOT_TRACE` 实测开发态启动：main-start→app-ready 95ms、window-created 4571ms（与 server-imported 并行重叠）、server-ready 7633ms、navigation-started 8078ms、window-shown 14670ms、page-loaded 14940ms。结论：render 已用 rAF 批量（`scheduleRender`），启动序列 load→applyTheme→bindGlobal→render→syncDetailOffset 全是同步轻量；模型卡用稳定增量排序，DOM 移动只发生在排序键变化的卡片，列表/网格不整列重排；详情重绘保留滚动+焦点锚点。无新的同步阻塞点，无需进一步改动。
@@ -16,7 +16,7 @@
 - **2026-09-02**：修复 start-aihubpanel.bat：4398/4179 落在 Windows 保留端口段导致静默启动失败，改为启动前试绑 + 自动退备用端口。
 
 ## 待办（当前轮）
-（无）
+- [ ] 修复审计 3 处问题（用户确认后）：healClientBlockedStation 缺 revision 竞态守卫（app.js:1480）；doDelete 失败回滚丢选择集且 deletingId 置 null 造成弹窗按钮失灵（app.js:3921）；saveForm 失败回滚丢勾选状态（app.js:3866）
 
 ## 已知问题（长期）
 - 便携 exe 每次启动 NSIS 自解压，实测 6 秒，要快用 zip 目录版（0.58 秒）
