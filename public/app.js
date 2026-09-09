@@ -462,6 +462,22 @@ function rememberCurrentModelSelection(){
   else selectedModelsByStation.delete(activeId);
   saveUIState();
 }
+function snapshotModelSelectionState(){
+  const byStation=new Map();
+  selectedModelsByStation.forEach((models,id)=>{
+    if(Array.isArray(models)) byStation.set(id,models.slice());
+  });
+  return { current:new Set(selectedModels), byStation };
+}
+function restoreModelSelectionState(snapshot){
+  selectedModelsByStation=new Map();
+  if(snapshot && snapshot.byStation instanceof Map){
+    snapshot.byStation.forEach((models,id)=>{
+      if(Array.isArray(models)) selectedModelsByStation.set(id,models.slice());
+    });
+  }
+  selectedModels=new Set(snapshot && snapshot.current instanceof Set ? snapshot.current : []);
+}
 function restoreModelSelection(id){
   const st=getById(id);
   const valid = new Set(st ? st.models.map(model=>model.id) : []);
@@ -1477,20 +1493,34 @@ function stationAuthHeaders(st, mode, originalHeaders={}){
 // 之后该站点所有请求自动走转发，不需要用户手工配置。
 const CLIENT_GATEWAY_UA = "claude-cli/2.0.0 (external, cli)";
 const CLIENT_DETECT_RE = /unauthorized[_\s-]?client|client[_\s-]?detect/i;
-async function healClientBlockedStation(st, url, mode, requestOptions, failedResponse){
-  if(!st || settings.proxy || !isCrossOriginHttpUrl(url)) return null;
+async function healClientBlockedStation(st, url, mode, requestOptions, failedResponse, requestRevision=null){
+  const stationId=st && st.id;
+  const revision=requestRevision == null && stationId ? stationRevision(stationId) : requestRevision;
+  const isCurrent=()=>!!stationId && isCurrentStation(stationId, revision);
+  if(!st || !stationId || settings.proxy || !isCrossOriginHttpUrl(url) || !isCurrent()) return null;
   // 已配置 User-Agent 的站点说明用户已有明确意图，其 UA 被拒时不越权改写。
   if(Object.keys(st.headers || {}).some(key=>key.toLowerCase()==="user-agent")) return null;
   let signature="";
   try{ signature=(await failedResponse.clone().text()).slice(0,2000); }catch(e){}
   if(!CLIENT_DETECT_RE.test(signature)) return null;
+  // 读取失败响应和探测本地转发都会让出事件循环，期间站点可能已被编辑/删除。
+  if(!isCurrent()) return null;
   if(!await checkLocalProxy()) return null;
+  if(!isCurrent()) return null;
   const relayOptions=stationRelayOptions({ ...st, headers:{ ...(st.headers||{}), "User-Agent":CLIENT_GATEWAY_UA } });
   let attempt;
   try{
     attempt=await fetchWithTimeout(url, { ...requestOptions, ...relayOptions, headers:stationAuthHeaders(st,mode,requestOptions.headers||{}) });
   }catch(error){ return null; }
-  if(!attempt.ok) return null;
+  if(!attempt.ok){
+    await discardResponse(attempt);
+    return null;
+  }
+  // 自动修复只允许写回发起这次请求的同一站点版本；迟到成功响应也要释放。
+  if(!isCurrent()){
+    await discardResponse(attempt);
+    return null;
+  }
   rememberRequestTransport(st, attempt);
   if(st.status) st.status.authMode=mode;
   st.headers={ ...(st.headers||{}), "User-Agent":CLIENT_GATEWAY_UA };
@@ -1509,7 +1539,9 @@ async function healClientBlockedStation(st, url, mode, requestOptions, failedRes
 async function fetchStationApi(st, url, options={}, timeoutSeconds=settings.timeout){
   const preferred=st && st.status && st.status.authMode === "x-api-key" ? "x-api-key" : "bearer";
   const alternate=preferred === "bearer" ? "x-api-key" : "bearer";
-  const { allowAuthRetry: requestedAuthRetry, ...requestOptions } = options || {};
+  const { allowAuthRetry: requestedAuthRetry, requestRevision: requestedRevision, ...requestOptions } = options || {};
+  // 调用方可传入固定版本；未传时也在本次调用开始时取快照，避免自动修复跨越配置变更。
+  const fixedRevision=requestedRevision == null && st && st.id ? stationRevision(st.id) : requestedRevision;
   const method=String(requestOptions.method || "GET").toUpperCase();
   // GET/HEAD 可安全地切换认证头；POST 等请求可能产生计费或副作用，禁止自动重发。
   const allowAuthRetry=requestedAuthRetry === true || (requestedAuthRetry !== false && ["GET","HEAD"].includes(method));
@@ -1526,7 +1558,7 @@ async function fetchStationApi(st, url, options={}, timeoutSeconds=settings.time
   // 两种认证头都被拒且网关明说「客户端不合法」时，大概率不是 Key 错，而是直连 UA 被指纹识别。
   // 401 响应说明上游没有执行任何操作，这里补带客户端 UA 经本地转发重试一次是安全的。
   if(!response.ok && (response.status===401 || response.status===403)){
-    const healed=await healClientBlockedStation(st, url, preferred, requestOptions, response);
+    const healed=await healClientBlockedStation(st, url, preferred, requestOptions, response, fixedRevision);
     if(healed) return healed;
   }
   return response;
@@ -1616,7 +1648,7 @@ function testConnectivity(id){
               headers:mode ? connectivityHeaders(st,mode) : {},
               ...stationRelayOptions(st)
             });
-            if(!isCurrentStation(id, revision)){ finishResponse(response); return { ok:false, stale:true }; }
+            if(!isCurrentStation(id, revision)){ await discardResponse(response); return { ok:false, stale:true }; }
               if(response.ok){
                const latency=performance.now()-started;
                const transport=responseTransport(response);
@@ -1761,8 +1793,8 @@ async function fetchBalanceRequest(id, revision){
     lastCandidatePath=candidate.path;
     let response;
     try{
-      response = await fetchStationApi(st, buildUrl(balanceEndpointUrl(st, candidate)));
-      if(!isCurrentStation(id, revision)){ finishResponse(response); return; }
+      response = await fetchStationApi(st, buildUrl(balanceEndpointUrl(st, candidate)), { requestRevision:revision });
+      if(!isCurrentStation(id, revision)){ await discardResponse(response); return; }
       const transport=rememberRequestTransport(st,response);
       if(!response.ok){
         errors.push(candidate.path + "：" + await responseError(response,st.apikey));
@@ -1925,8 +1957,8 @@ async function fetchNewApiStatus(st, revision){
   try{
     // 仅用于正确显示 New API 配额单位，失败不影响已拿到的余额；最多等待 5 秒。
     response=await fetchWithTimeout(buildUrl(rootApiUrl(st.baseurl,"/api/status")), { ...stationRelayOptions(st) }, Math.min(settings.timeout,5));
-    if(!isCurrentStation(st.id, revision)){ finishResponse(response); return null; }
-    if(!response.ok){ finishResponse(response); return null; }
+    if(!isCurrentStation(st.id, revision)){ await discardResponse(response); return null; }
+    if(!response.ok){ await discardResponse(response); return null; }
     return await responseData(response);
   }catch(error){ return null; }
 }
@@ -1997,8 +2029,8 @@ async function fetchModelsRequest(id, revision){
   const requestStarted=performance.now();
   try{
     // 不读取也不修改连通性诊断状态：模型列表接口用自己的响应决定成败。
-    const response = await fetchStationApi(st, buildUrl(apiUrl(st.baseurl, "/v1/models")));
-    if(!isCurrentStation(id, revision)){ finishResponse(response); return; }
+    const response = await fetchStationApi(st, buildUrl(apiUrl(st.baseurl, "/v1/models")), { requestRevision:revision });
+    if(!isCurrentStation(id, revision)){ await discardResponse(response); return; }
     const transport=rememberRequestTransport(st,response);
     if(!response.ok){
       const message=await responseError(response,st.apikey);
@@ -2077,14 +2109,15 @@ const DEPTH_PROBES = Object.freeze({
 });
 const CAPABILITY_GRADE_LABELS = Object.freeze({ usable:"可用", limited:"受限", unusable:"不可用" });
 function probeToken(prefix){ return prefix + "-" + Math.random().toString(36).slice(2,8).toUpperCase(); }
-async function probeChat(st, payload, timeoutSeconds=settings.timeout){
+async function probeChat(st, payload, timeoutSeconds=settings.timeout, requestRevision=null){
   const response = await fetchStationApi(st, buildUrl(apiUrl(st.baseurl, "/v1/chat/completions")), {
     method:"POST",
     headers:{ "Content-Type":"application/json" },
     body: JSON.stringify(payload),
     // POST 默认不重试认证头，因为可能重复计费；但 401/403 的请求不会产生用量，
     // 而只认 x-api-key 的网关在这里被判「不可用」是纯粹的误判，必须允许换一次头再试。
-    allowAuthRetry: true
+    allowAuthRetry: true,
+    requestRevision
   }, timeoutSeconds);
   rememberRequestTransport(st, response);
   return response;
@@ -2171,7 +2204,7 @@ async function sendProbeChat(st, ctx, payload, timeoutSeconds=settings.timeout){
     let response;
     const sentAt = performance.now();
     try{
-      response = await probeChat(st, shapedPayload(ctx, payload), seconds);
+      response = await probeChat(st, shapedPayload(ctx, payload), seconds, ctx.revision);
     }catch(error){
       const message = networkErrorMessage(error, st && st.apikey);
       // 慢而可用的模型（尤其推理模型）在默认 15s 下必然超时。放宽一次窗口再试，
@@ -2406,12 +2439,13 @@ function capabilitySummary(capability){
 }
 // 探针在单个模型内串行（后续探针依赖前面的响应，也避免同模型并发触发限流）；
 // 模型之间的并行由 batchTest 的工作池控制。alive() 在每个探针之间检查站点是否还是同一个。
-async function runCapabilitySuite(st, modelId, depth, alive){
+async function runCapabilitySuite(st, modelId, depth, alive, revision=null){
   const keys = DEPTH_PROBES[depth] || DEPTH_PROBES.basic;
+  const suiteRevision=revision == null && st && st.id ? stationRevision(st.id) : revision;
   // shape/minTokens/timeoutFloor 在探针之间共享：chat 一旦协商出可用的请求形状或
   // 认出是推理模型，后续探针直接沿用，不再重复试探。
   const ctx = {
-    modelId, answered:false, reportedModel:"",
+    modelId, revision:suiteRevision, answered:false, reportedModel:"",
     shape:{ dropTemperature:false, tokenField:"max_tokens", dropTokenLimit:false },
     minTokens:0, timeoutFloor:0,
     metrics:{ ttft:null, total:null, outputTokens:null, tps:null, chatMs:null }
@@ -2469,7 +2503,7 @@ async function testModel(id, modelId, revision=stationRevision(id), options={}){
     model.test = "testing"; model.latency = null; model.err = null; model.lastRequestAt=Date.now();
     persistModelProgress(id, revision);
     started = performance.now();
-    const capability = await runCapabilitySuite(st, modelId, depth, ()=>isCurrentStation(id, revision));
+    const capability = await runCapabilitySuite(st, modelId, depth, ()=>isCurrentStation(id, revision), revision);
     // 站点在测试期间被删除或改动：结果已失效，直接丢弃，不写回任何字段。
     if(!capability || !isCurrentStation(id, revision)) return false;
     st = getById(id);
@@ -3866,6 +3900,14 @@ function saveForm(){
   if(editingId){
     const st = getById(editingId);
     if(!st){ hideModal("formModal"); return; }
+    const selectionSnapshot=snapshotModelSelectionState();
+    const revealedBeforeSave=revealedApiKeyIds.has(st.id);
+    const previousDisplaySnapshot=modelDisplaySnapshots.get(st.id);
+    const displaySnapshot=previousDisplaySnapshot ? {
+      ids:previousDisplaySnapshot.ids.slice(),
+      keys:new Map(previousDisplaySnapshot.keys)
+    } : null;
+    let invalidatedForSave=false;
     const connectionChanged = st.baseurl !== baseurl || st.apikey !== apikey;
     const headersChanged = JSON.stringify(st.headers || {}) !== JSON.stringify(customHeaders);
     const balancePathChanged = st.balancePath !== balancePath;
@@ -3873,23 +3915,32 @@ function saveForm(){
     const stationSnapshot=JSON.stringify(st);
     Object.assign(st, { name, baseurl, apikey, group, note, balancePath, headers:customHeaders });
     // 更换服务地址或密钥后，旧连通性/余额/模型测试均不再可信；让迟到请求失效。
-    if(connectionChanged){ revealedApiKeyIds.delete(st.id); invalidateStation(st.id); resetStationRuntime(st); selectedModelsByStation.delete(st.id); if((focusId || selectedId)===st.id) selectedModels.clear(); }
+    if(connectionChanged){ invalidatedForSave=true; revealedApiKeyIds.delete(st.id); invalidateStation(st.id); resetStationRuntime(st); selectedModelsByStation.delete(st.id); if((focusId || selectedId)===st.id) selectedModels.clear(); }
     else if(headersChanged){
       // 只改了请求头：旧的连通性结论不可信，让在途请求失效并复位连通状态；
       // 模型列表与测试结果仍有效，用户可一键复测，不必重新拉取。
+      invalidatedForSave=true;
       invalidateStation(st.id);
       st.status.connectivity="unknown"; st.status.latency=null; st.status.error=null; st.status.transport=null;
     }
     else if(balancePathChanged){
       // 自定义余额路径变更时同样使未完成请求失效，防止旧路径的响应回写新配置。
+      invalidatedForSave=true;
       invalidateStation(st.id);
       st.status.balance=null; st.status.balanceKind="balance"; st.status.balanceUnlimited=false;
       st.status.balanceUnit=null; st.status.balanceSource=null; st.status.balanceNote=null; st.status.balanceRaw=null; st.status.balanceError=null;
     }
     persisted=save();
     if(!persisted){
-      // 还原单站字段；invalidate/resetStationRuntime 产生的运行时标记对用户不可见，无需回退。
+      // 还原单站字段；已失效的旧请求不会重新生效，下面按需清理遗留的 testing 标记。
       Object.assign(st, JSON.parse(stationSnapshot));
+      restoreModelSelectionState(selectionSnapshot);
+      if(revealedBeforeSave) revealedApiKeyIds.add(st.id); else revealedApiKeyIds.delete(st.id);
+      if(invalidatedForSave){
+        // 旧请求已经被判定为失效，恢复后必须保持新的 revision，同时清掉快照中的 testing 标记。
+        invalidateStation(st.id);
+        if(displaySnapshot) modelDisplaySnapshots.set(st.id,displaySnapshot);
+      }
       toast("保存失败：本地存储不可用（已满、只读或被禁用），请先导出备份再清理空间","err");
       return;   // 不关弹窗、不渲染，让用户看到错误并决定如何处理
     }
@@ -3924,6 +3975,14 @@ function doDelete(){
   // 删除是结构性变更，持久化失败需整体还原，否则刷新后“已删除”的站点又回来了却无人提示。
   const stationsSnapshot=JSON.stringify(stations);
   const prevSelectedId=selectedId, prevFocusId=focusId, prevFocusReturnScroll=focusReturnScroll, prevFocusReturnStationId=focusReturnStationId;
+  const selectionSnapshot=snapshotModelSelectionState();
+  const revealedBeforeDelete=revealedApiKeyIds.has(deletingId);
+  const previousDisplaySnapshot=modelDisplaySnapshots.get(deletingId);
+  const displaySnapshot=previousDisplaySnapshot ? {
+    ids:previousDisplaySnapshot.ids.slice(),
+    keys:new Map(previousDisplaySnapshot.keys)
+  } : null;
+  const prevDeletingId=deletingId;
   invalidateStation(deletingId); // 删除后忽略所有未结束网络请求的迟到响应
   revealedApiKeyIds.delete(deletingId);
   const wasActiveStation = selectedId === deletingId || focusId === deletingId;
@@ -3944,7 +4003,16 @@ function doDelete(){
     // 还原全部结构性状态，保持删除弹窗打开以便用户处理存储问题后再试。
     stations=JSON.parse(stationsSnapshot);
     selectedId=prevSelectedId; focusId=prevFocusId; focusReturnScroll=prevFocusReturnScroll; focusReturnStationId=prevFocusReturnStationId;
-    deletingId=null;
+    restoreModelSelectionState(selectionSnapshot);
+    if(revealedBeforeDelete) revealedApiKeyIds.add(prevDeletingId); else revealedApiKeyIds.delete(prevDeletingId);
+    deletingId=prevDeletingId;
+    // 删除已使旧请求失效；恢复后清掉可能遗留的 testing 标记，但不丢掉原有展示顺序快照。
+    invalidateStation(prevDeletingId);
+    if(displaySnapshot) modelDisplaySnapshots.set(prevDeletingId,displaySnapshot);
+    // 两个存储键没有跨键事务；尽力把回滚后的内存状态补偿写回，避免只成功写入其中一个键。
+    save();
+    saveUIState();
+    render({ scrollState });
     toast("删除失败：本地存储不可用（已满、只读或被禁用），请先导出备份再清理空间","err");
     return;
   }
