@@ -75,3 +75,5 @@
 - 测试中卡片保留上次快照排序键，插入比较必须用同一份 `keys`（public/app.js:2668），不能用实时 latency
 - `modelListEmpty` 仅在 HTTP 200 + 空数组时为真，任何错误/非空都清
 - Electron 错误路径用 `dialog.showErrorBox` + `app.exit(1)`，用户行为不变
+- API 请求链固定发起时的 `stationRevision`；自动客户端修复不得在站点编辑/删除后写回旧配置，过期响应体要取消以释放连接。
+- 删除或编辑保存失败回滚时要恢复站点、模型勾选、Key 显示和排序快照；站点请求已失效时保留新 revision，避免模型卡永久停在“测试中”。
