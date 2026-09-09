@@ -1167,9 +1167,10 @@ function isCrossOriginHttpUrl(url){
 }
 function localProxyUrl(target){ return LOCAL_PROXY_PATH+"?url="+encodeURIComponent(target); }
 function responseTransport(response){ return responseTransports.get(response) || (settings.proxy ? "custom" : "direct"); }
-function rememberRequestTransport(st, response){
+function rememberRequestTransport(st, response, revision=null){
   const transport=responseTransport(response);
-  if(st && st.status && ["direct","builtin","custom"].includes(transport)) st.status.transport=transport;
+  if(st && st.status && ["direct","builtin","custom"].includes(transport) &&
+    (revision == null || isCurrentStation(st.id, revision))) st.status.transport=transport;
   return transport;
 }
 // 站点配置了自定义请求头但本次请求没能走本地转发时提示一次：浏览器会静默丢掉
@@ -1521,8 +1522,8 @@ async function healClientBlockedStation(st, url, mode, requestOptions, failedRes
     await discardResponse(attempt);
     return null;
   }
-  rememberRequestTransport(st, attempt);
-  if(st.status) st.status.authMode=mode;
+  rememberRequestTransport(st, attempt, revision);
+  if(st.status && isCurrent()) st.status.authMode=mode;
   st.headers={ ...(st.headers||{}), "User-Agent":CLIENT_GATEWAY_UA };
   save();
   toast("该网关按客户端指纹放行（401 unauthorized client）：已自动为站点配置 User-Agent 并改走本地同源转发", "ok");
@@ -1548,13 +1549,13 @@ async function fetchStationApi(st, url, options={}, timeoutSeconds=settings.time
   const request=mode=>fetchWithTimeout(url,{ ...requestOptions, ...stationRelayOptions(st), headers:stationAuthHeaders(st,mode,requestOptions.headers || {}) },timeoutSeconds);
   let response=await request(preferred);
   if(response.ok){
-    if(st && st.status) st.status.authMode=preferred;
+    if(st && st.status && (fixedRevision == null || isCurrentStation(st.id, fixedRevision))) st.status.authMode=preferred;
     return response;
   }
   if(!allowAuthRetry || (response.status!==401 && response.status!==403)) return response;
   await discardResponse(response);
   response=await request(alternate);
-  if(response.ok && st && st.status) st.status.authMode=alternate;
+  if(response.ok && st && st.status && (fixedRevision == null || isCurrentStation(st.id, fixedRevision))) st.status.authMode=alternate;
   // 两种认证头都被拒且网关明说「客户端不合法」时，大概率不是 Key 错，而是直连 UA 被指纹识别。
   // 401 响应说明上游没有执行任何操作，这里补带客户端 UA 经本地转发重试一次是安全的。
   if(!response.ok && (response.status===401 || response.status===403)){
@@ -1795,7 +1796,7 @@ async function fetchBalanceRequest(id, revision){
     try{
       response = await fetchStationApi(st, buildUrl(balanceEndpointUrl(st, candidate)), { requestRevision:revision });
       if(!isCurrentStation(id, revision)){ await discardResponse(response); return; }
-      const transport=rememberRequestTransport(st,response);
+      const transport=rememberRequestTransport(st,response,revision);
       if(!response.ok){
         errors.push(candidate.path + "：" + await responseError(response,st.apikey));
         continue;
@@ -2031,7 +2032,7 @@ async function fetchModelsRequest(id, revision){
     // 不读取也不修改连通性诊断状态：模型列表接口用自己的响应决定成败。
     const response = await fetchStationApi(st, buildUrl(apiUrl(st.baseurl, "/v1/models")), { requestRevision:revision });
     if(!isCurrentStation(id, revision)){ await discardResponse(response); return; }
-    const transport=rememberRequestTransport(st,response);
+    const transport=rememberRequestTransport(st,response,revision);
     if(!response.ok){
       const message=await responseError(response,st.apikey);
       appendRequestLog(st,{ level:"error", kind:"模型列表", method:"GET", endpoint:"/v1/models", status:response.status, latency:performance.now()-requestStarted, transport, message });
@@ -2119,7 +2120,7 @@ async function probeChat(st, payload, timeoutSeconds=settings.timeout, requestRe
     allowAuthRetry: true,
     requestRevision
   }, timeoutSeconds);
-  rememberRequestTransport(st, response);
+  rememberRequestTransport(st, response, requestRevision);
   return response;
 }
 function chatChoice(data){
