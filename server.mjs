@@ -12,7 +12,9 @@ import { fileURLToPath } from "node:url";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(HERE, "public");
 const PUBLIC_REAL_DIR = fs.realpathSync(PUBLIC_DIR);
-const PORT = Number(process.env.AI_HUB_PORT) || 4179;
+const configuredPort = Number(process.env.AI_HUB_PORT);
+const PORT = Number.isInteger(configuredPort) && configuredPort >= 0 && configuredPort <= 65535 ? configuredPort : 4179;
+let listeningPort = PORT;
 const HOST = process.env.AI_HUB_HOST || "127.0.0.1";
 const PROXY_PATH = "/api/proxy";
 const PROXY_HEALTH_PATH = "/api/proxy/health";
@@ -25,7 +27,6 @@ const PROXY_MAX_BODY_BYTES = 10 * 1024 * 1024;
 const PROXY_MAX_RESPONSE_BYTES = 50 * 1024 * 1024;
 const RAW_ALLOWED_PROXY_ORIGIN = String(process.env.AI_HUB_ALLOWED_ORIGIN || "").trim();
 const ALLOWED_PROXY_ORIGIN = normaliseConfiguredOrigin(RAW_ALLOWED_PROXY_ORIGIN);
-const LOOPBACK_PROXY_ORIGINS = new Set([`http://127.0.0.1:${PORT}`, `http://localhost:${PORT}`, `http://[::1]:${PORT}`]);
 const IS_LOOPBACK_BIND = isLoopbackBindHost(HOST);
 if (RAW_ALLOWED_PROXY_ORIGIN && !ALLOWED_PROXY_ORIGIN) {
   throw new Error("AI_HUB_ALLOWED_ORIGIN 必须是有效的 http(s) origin，例如 http://192.168.1.20:4179");
@@ -33,7 +34,6 @@ if (RAW_ALLOWED_PROXY_ORIGIN && !ALLOWED_PROXY_ORIGIN) {
 if (!IS_LOOPBACK_BIND && !ALLOWED_PROXY_ORIGIN) {
   throw new Error("非回环监听必须显式设置 AI_HUB_ALLOWED_ORIGIN，避免同源转发被伪造成开放代理");
 }
-const PROXY_ORIGINS = new Set(ALLOWED_PROXY_ORIGIN ? [ALLOWED_PROXY_ORIGIN] : LOOPBACK_PROXY_ORIGINS);
 
 const TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -120,6 +120,13 @@ function originOf(value) {
   }
 }
 
+function isAllowedProxyOrigin(origin) {
+  if (ALLOWED_PROXY_ORIGIN) return origin === ALLOWED_PROXY_ORIGIN;
+  return origin === `http://127.0.0.1:${listeningPort}` ||
+    origin === `http://localhost:${listeningPort}` ||
+    origin === `http://[::1]:${listeningPort}`;
+}
+
 // 只信任固定配置的 origin；绝不根据客户端可控的 Host 头动态推断允许源。
 // Sec-Fetch-Site 仅作为浏览器 CSRF 信号，不承担 LAN 身份认证职责。
 function isSameOriginProxyRequest(req) {
@@ -127,9 +134,9 @@ function isSameOriginProxyRequest(req) {
   const referer = originOf(req.headers.referer);
   const fetchSite = String(req.headers["sec-fetch-site"] || "").toLowerCase();
   if (fetchSite && fetchSite !== "same-origin") return false;
-  if (origin && !PROXY_ORIGINS.has(origin)) return false;
-  if (referer && !PROXY_ORIGINS.has(referer)) return false;
-  if (origin || referer) return PROXY_ORIGINS.has(origin || referer);
+  if (origin && !isAllowedProxyOrigin(origin)) return false;
+  if (referer && !isAllowedProxyOrigin(referer)) return false;
+  if (origin || referer) return isAllowedProxyOrigin(origin || referer);
   // Chromium 同源 GET 可能只带 Fetch Metadata；仅在服务绑定回环时接受该情况。
   return IS_LOOPBACK_BIND && fetchSite === "same-origin";
 }
@@ -493,11 +500,22 @@ server.on("error", error => {
   if (!server.listening) server.close(() => process.exit(1));
 });
 
-server.listen(PORT, HOST, () => {
-  console.log(`中转站管理面板已启动：`);
-  console.log(`  监听：${HOST}:${PORT}`);
-  console.log(`  本机：http://127.0.0.1:${PORT}`);
-  if (IS_LOOPBACK_BIND) console.log(`  同源转发允许：http://127.0.0.1:${PORT}、http://localhost:${PORT}、http://[::1]:${PORT}`);
-  else console.log(`  同源转发允许：${ALLOWED_PROXY_ORIGIN}`);
-  console.log(`  本服务会在浏览器跨域请求失败时提供受限同源转发；静态部署仅支持目标站已开启 CORS 的直连请求。`);
+export const serverReady = new Promise((resolve, reject) => {
+  const onListening = () => resolve(server.address());
+  const onError = error => {
+    server.off("listening", onListening);
+    reject(error);
+  };
+  server.once("listening", onListening);
+  server.once("error", onError);
+  server.listen(PORT, HOST, () => {
+    const address = server.address();
+    if (address && typeof address === "object") listeningPort = address.port;
+    console.log(`中转站管理面板已启动：`);
+    console.log(`  监听：${HOST}:${listeningPort}`);
+    console.log(`  本机：http://127.0.0.1:${listeningPort}`);
+    if (IS_LOOPBACK_BIND) console.log(`  同源转发允许：http://127.0.0.1:${listeningPort}、http://localhost:${listeningPort}、http://[::1]:${listeningPort}`);
+    else console.log(`  同源转发允许：${ALLOWED_PROXY_ORIGIN}`);
+    console.log(`  本服务会在浏览器跨域请求失败时提供受限同源转发；静态部署仅支持目标站已开启 CORS 的直连请求。`);
+  });
 });

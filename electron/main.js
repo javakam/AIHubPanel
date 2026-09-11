@@ -3,15 +3,9 @@
 // 转发和 SSE 流式全部由 server.mjs 和前端原样承担，这里不碰网络。
 const { app, BrowserWindow, Menu, shell, dialog } = require("electron");
 const path = require("node:path");
-const net = require("node:net");
-const http = require("node:http");
 const { pathToFileURL } = require("node:url");
 
-const HEALTH_PATH = "/api/proxy/health";
-const READY_TIMEOUT_MS = 15000;
-// 服务就绪只能靠轮询：server.mjs 在自己模块里 listen，主进程拿不到它的 listening 事件。
-// 间隔小一点，命中前的等待就短一点；一次探测是回环 HTTP，开销可以忽略。
-const READY_POLL_MS = 20;
+const STARTUP_PROBE = process.env.AIHUB_STARTUP_PROBE === "1";
 // 启动耗时诊断。默认完全关闭，设了 AIHUB_BOOT_TRACE=<文件路径> 才逐段记时间，
 // 用来回答「到底慢在自解压、服务启动还是页面渲染」，不必再改代码重打包。
 // 每行前面是绝对时间戳：便携 exe 自解压那几秒发生在本进程存在之前，
@@ -22,7 +16,8 @@ const T0 = Date.now();
 function trace(stage, label) {
   if (!TRACE_FILE) return;
   try {
-    require("node:fs").appendFileSync(TRACE_FILE, `${Date.now()} +${String(Date.now() - T0).padStart(5)}ms ${stage} ${label}\n`);
+    const line = `${Date.now()} +${String(Date.now() - T0).padStart(5)}ms ${stage} ${label}\n`;
+    require("node:fs").appendFileSync(TRACE_FILE, line);
   } catch { /* 诊断写不进去不影响启动 */ }
 }
 trace("main-start", "main.js 开始执行");
@@ -37,40 +32,13 @@ function appPath(...segments) {
   return full.includes(packed) ? full.replace(packed, `${path.sep}app.asar.unpacked${path.sep}`) : full;
 }
 
-// 让系统分配空闲端口：listen 0 拿到端口号后立刻释放。
-// 网页版可能正占着 4398，桌面版不写死端口就不会和它互相抢。
-function pickFreePort() {
-  return new Promise((resolve, reject) => {
-    const probe = net.createServer();
-    probe.once("error", reject);
-    probe.listen(0, "127.0.0.1", () => {
-      const { port } = probe.address();
-      probe.close(() => resolve(port));
-    });
-  });
-}
-
-// 用面板自带的健康检查确认服务真的能应答，而不是只看端口有没有被占。
-function probeHealth(port) {
-  return new Promise(resolve => {
-    const req = http.get({ host: "127.0.0.1", port, path: HEALTH_PATH, timeout: 1000 }, res => {
-      const ok = res.statusCode === 200 && res.headers["x-aihub-proxy"] === "1";
-      res.resume();
-      resolve(ok);
-    });
-    req.once("timeout", () => req.destroy());
-    req.once("error", () => resolve(false));
-  });
-}
-
-const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
-
 // config.json 放 exe 同目录，用户打开程序所在文件夹就能看到、随手改。
-// portable 包运行时会把自己解压到临时目录，app.getPath("exe") 指的是那个临时副本，
-// 只有 PORTABLE_EXECUTABLE_DIR 才是用户看到的 exe 位置。
+// portable 包运行时会把自己解压到临时目录，app.getPath("exe") 指的是那个临时副本。
+// electron-builder portable 会提供 PORTABLE_EXECUTABLE_DIR；FILE 作为兼容兜底。
 // 开发态（npm start）的 exe 在 node_modules 里，配置写那儿等于丢文件，所以退回仓库根目录。
 function configDir() {
-  if (process.env.PORTABLE_EXECUTABLE_DIR) return process.env.PORTABLE_EXECUTABLE_DIR;
+  if (process.env.PORTABLE_EXECUTABLE_DIR) return path.resolve(process.env.PORTABLE_EXECUTABLE_DIR);
+  if (process.env.PORTABLE_EXECUTABLE_FILE) return path.dirname(path.resolve(process.env.PORTABLE_EXECUTABLE_FILE));
   return app.isPackaged ? path.dirname(app.getPath("exe")) : path.join(__dirname, "..");
 }
 
@@ -79,9 +47,10 @@ function configDir() {
 // 也不会在异常退出时留下占着端口的孤儿进程。
 // 它在模块加载时就读取环境变量，因此端口必须先写进 process.env。
 async function startServer() {
-  const port = await pickFreePort();
-  trace("port-picked", "拿到空闲端口 " + port);
-  process.env.AI_HUB_PORT = String(port);
+  trace("server-start", "开始启动本地服务");
+  // 直接让服务 listen(0) 并返回系统分配的端口，避免“先探测、释放、再监听”的
+  // 两次 socket 操作和端口被抢占的竞态。
+  process.env.AI_HUB_PORT = "0";
   process.env.AI_HUB_HOST = "127.0.0.1";
   // 用户系统里若设过这个变量，同源校验就只认那个 origin，本窗口的请求会被一律拒掉。
   // 桌面版固定回环监听，用不上它，清掉以免继承到外部配置。
@@ -89,18 +58,20 @@ async function startServer() {
 
   // server.mjs 在模块顶层就建目录、校验参数并 listen；配置不合法会直接抛，
   // 在这里能原样拿到错误信息，比从子进程的 stderr 里捞更准。
-  await import(pathToFileURL(appPath("server.mjs")).href);
+  trace("server-import-start", "开始加载 server.mjs");
+  const serverModule = await import(pathToFileURL(appPath("server.mjs")).href);
   trace("server-imported", "server.mjs import 完成");
-
-  const deadline = Date.now() + READY_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (await probeHealth(port)) { trace("server-ready", "健康检查通过"); return port; }
-    await wait(READY_POLL_MS);
-  }
-  throw new Error(`本地服务在 ${READY_TIMEOUT_MS / 1000} 秒内没有就绪`);
+  const address = await serverModule.serverReady;
+  const port = address && typeof address === "object" ? address.port : null;
+  if (!Number.isInteger(port) || port <= 0) throw new Error("本地服务没有返回有效端口");
+  trace("server-ready", "server.listen 已就绪，端口 " + port);
+  return port;
 }
 
 function createWindow() {
+  trace("window-create-start", "开始创建 BrowserWindow");
+  const dataDir = configDir();
+  trace("config-dir", dataDir);
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -118,7 +89,7 @@ function createWindow() {
       sandbox: false,
       preload: path.join(__dirname, "preload.js"),
       // preload 拿不到 app 对象，配置目录只能从主进程传过去。
-      additionalArguments: [`--aihub-config-dir=${configDir()}`],
+      additionalArguments: [`--aihub-config-dir=${dataDir}`],
       spellcheck: false
     }
   });
@@ -138,8 +109,32 @@ function createWindow() {
 // ready-to-show 只在这一刻挂：空窗口不导航不会触发它，但先挂上就得多一层
 // 「是不是 about:blank 的首帧」判断，没必要。
 function loadPanel(port) {
-  mainWindow.once("ready-to-show", () => { trace("window-shown", "首帧画好，显示窗口"); mainWindow.show(); });
-  mainWindow.webContents.once("did-finish-load", () => trace("page-loaded", "页面加载完成"));
+  mainWindow.webContents.once("dom-ready", () => trace("dom-ready", "文档 DOM 已就绪"));
+  mainWindow.webContents.once("did-stop-loading", () => trace("did-stop-loading", "页面停止加载"));
+  mainWindow.webContents.once("did-finish-load", () => {
+    trace("page-loaded", "页面加载完成");
+    void mainWindow.webContents.executeJavaScript(`
+      (() => {
+        const timing = performance.getEntriesByType("navigation")[0];
+        return timing ? {
+          responseEnd: timing.responseEnd,
+          domContentLoaded: timing.domContentLoadedEventEnd,
+          loadEventEnd: timing.loadEventEnd,
+          fcp: performance.getEntriesByName("first-contentful-paint")[0]?.startTime ?? null
+        } : null;
+      })()
+    `, true).then(timing => trace("page-timing", JSON.stringify(timing || {}))).catch(() => {});
+  });
+  mainWindow.once("ready-to-show", () => {
+    trace("ready-to-show", "首帧画好");
+    if (STARTUP_PROBE) {
+      trace("window-shown", "启动探针完成");
+      app.quit();
+      return;
+    }
+    mainWindow.show();
+    trace("window-shown", "首帧画好，显示窗口");
+  });
   void mainWindow.loadURL(`http://127.0.0.1:${port}`);
   trace("navigation-started", "loadURL 已发出");
 }
@@ -148,6 +143,12 @@ function loadPanel(port) {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
+  // server.mjs 只依赖 Node 内置模块，可以在 Electron 完成 ready 前就开始监听；
+  // 这样服务模块加载与 Chromium 初始化并行，拿到真实端口后直接导航。
+  const serverPromise = startServer();
+  // 启动失败会在 app.whenReady 的 await 处统一展示错误；提前挂一个 rejection
+  // 处理器，避免服务失败早于 Electron ready 时触发未处理 Promise 警告。
+  serverPromise.catch(() => {});
   app.on("second-instance", () => {
     if (!mainWindow) return;
     if (mainWindow.isMinimized()) mainWindow.restore();
@@ -160,9 +161,9 @@ if (!app.requestSingleInstanceLock()) {
     try {
       // 窗口创建和服务启动互不依赖，原来串着做等于白等一段。
       // createWindow 同步返回，渲染进程和 GPU 通道的拉起在后台进行，
-      // 正好和端口探测、server.mjs 加载重叠；拿到端口再导航。
+      // 正好和 server.mjs 加载重叠；拿到端口再导航。
       createWindow();
-      loadPanel(await startServer());
+      loadPanel(await serverPromise);
     } catch (error) {
       dialog.showErrorBox("AIHubPanel 启动失败", `本地服务没能启动。\n\n${error instanceof Error ? error.message : String(error)}`);
       app.exit(1);

@@ -20,6 +20,7 @@ const configFile = configDir ? path.join(configDir, "config.json") : "";
 
 let cache = null;      // 最近一次读到或写出的完整配置
 let cacheStamp = "";   // 对应的文件 mtime + 大小，用来发现文件被外部改过
+let cacheLoaded = false;
 
 function stampOf() {
   try {
@@ -34,7 +35,7 @@ function stampOf() {
 // 只有确认文件没变才用缓存，避免把手工修改覆盖掉。
 function readConfig() {
   const stamp = stampOf();
-  if (cache && stamp && stamp === cacheStamp) return cache;
+  if (cacheLoaded && stamp === cacheStamp) return cache;
   try {
     const parsed = JSON.parse(fs.readFileSync(configFile, "utf8"));
     cache = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
@@ -42,6 +43,7 @@ function readConfig() {
     // 文件不存在时按空配置处理；内容损坏时也不立刻清空，留到下一次写入整体覆盖。
     cache = {};
   }
+  cacheLoaded = true;
   cacheStamp = stamp;
   return cache;
 }
@@ -61,12 +63,27 @@ function writeConfig(config) {
     fs.writeFileSync(configFile, text, "utf8");
   }
   cache = config;
+  cacheLoaded = true;
   cacheStamp = stampOf();
+}
+
+function parseUpdates(items) {
+  if (!items || typeof items !== "object" || Array.isArray(items)) {
+    throw new Error("批量存储数据格式无效");
+  }
+  const updates = {};
+  for (const [key, value] of Object.entries(items)) {
+    const field = FIELDS[key];
+    if (!field) throw new Error(`不支持的存储项：${key}`);
+    if (typeof value !== "string") throw new Error(`存储项格式无效：${key}`);
+    updates[field] = JSON.parse(value);
+  }
+  return updates;
 }
 
 const store = {
   // 沿用 localStorage 的约定：没有这一项就返回 null。
-  // 前端靠它区分「第一次运行，植入默认站」和「用户主动删空，保留空数组」。
+  // 前端按缺失项和空数组统一显示空状态，用户可从界面添加自己的站点。
   getItem(key) {
     const field = FIELDS[key];
     if (!field || !configFile) return null;
@@ -75,10 +92,13 @@ const store = {
   },
   // 写失败时直接抛出，前端原有的 try/catch 会据此提示用户，不会静默丢数据。
   setItem(key, value) {
-    const field = FIELDS[key];
-    if (!field) throw new Error(`不支持的存储项：${key}`);
     if (!configFile) throw new Error("没有拿到配置目录，无法写入 config.json");
-    writeConfig({ ...readConfig(), [field]: JSON.parse(value) });
+    writeConfig({ ...readConfig(), ...parseUpdates({ [key]: value }) });
+  },
+  // 多个 localStorage key 合并为一次配置写入，设置/删除/导入时避免重复改名和磁盘刷新。
+  setItems(items) {
+    if (!configFile) throw new Error("没有拿到配置目录，无法写入 config.json");
+    writeConfig({ ...readConfig(), ...parseUpdates(items) });
   }
 };
 

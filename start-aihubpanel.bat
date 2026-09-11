@@ -4,7 +4,7 @@ cd /d "%~dp0"
 
 REM Keep this file ASCII-only. cmd.exe reads .bat with the system codepage
 REM (GBK on this machine), so UTF-8 comments turn into garbage that eats the
-REM next lines. Explanations in Chinese live in docs/agent/techContext.md.
+REM next lines. Explanations live in docs/agent/reference.md.
 
 REM server.mjs prints its startup banner in UTF-8; switch the console to UTF-8
 REM so it stays readable instead of turning into mojibake.
@@ -54,7 +54,10 @@ if not "%AI_HUB_PORT%"=="%AI_HUB_PORT_PREFERRED%" (
   echo.
 )
 
-start "" /b powershell.exe -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 1; Start-Process 'http://127.0.0.1:%AI_HUB_PORT%/'"
+REM Do not open a browser or create a background process by default.
+REM Set AI_HUB_OPEN_BROWSER=1 before running this file for an explicit opt-in.
+if /i "%AI_HUB_OPEN_BROWSER%"=="1" start "" /b powershell.exe -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 1; Start-Process 'http://127.0.0.1:%AI_HUB_PORT%/'"
+echo Open this address manually: http://127.0.0.1:%AI_HUB_PORT%/
 node server.mjs
 
 echo.

@@ -4,14 +4,14 @@
    数据存本地：桌面版写 exe 同目录的明文 config.json，浏览器里写 localStorage；
    请求优先浏览器直连，CORS 失败时可回退受限同源转发。
    本文件结构：
-     1) 常量与默认数据   2) 存储层   3) 工具函数   4) 网络层（连通/余额/模型/批量）
+     1) 常量与初始状态   2) 存储层   3) 工具函数   4) 网络层（连通/余额/模型/批量）
      5) 健康总览         6) 渲染（列表/网格/详情/专注）  7) 交互（拖拽/选中/表单/删除/导入导出）
      8) 主题             9) 启动
    终审已修复：fileInput 非法嵌套、亮色对比度、徽标文字、主按钮白字、balanceRaw 展示、
    连通中禁用重测、拖拽手柄点击误选中、剪贴板非安全上下文兜底、matchMedia 兼容、死代码清理。
    ========================================================================= */
 
-/* ---------------- 常量与默认数据 ---------------- */
+/* ---------------- 常量与初始状态 ---------------- */
 const LS_STATIONS = "aihub.stations.v2";   // 中转站数组的存储键
 const LS_SETTINGS  = "aihub.settings.v2";  // 设置的存储键
 const LS_UI_STATE   = "aihub.ui.v1";       // 非敏感界面状态（不含 API Key）
@@ -93,16 +93,6 @@ const DEFAULT_BALANCE_ENDPOINTS = Object.freeze([
   { path:"/v1/user/info/balance", source:"兼容余额接口", parser:"generic" }
 ]);
 
-// 默认预置中转站（首次打开、无本地数据时植入）；凭据绝不写入静态源码。
-const DEFAULT_STATION = {
-  name:"新疆-m",
-  baseurl:"https://api.hcnsec.cn",
-  apikey:"",
-  group:"",
-  note:"请通过快速导入或编辑填写 API Key",
-  balancePath:""
-};
-
 // 全局状态
 let stations = [];                                   // 中转站数组（有序）
 let settings = { ...DEFAULT_SETTINGS };
@@ -130,7 +120,8 @@ const manualModelTests = new Map();                    // 每站手动测试中�
 const batchRefreshTimers = new Map();                  // 批量测试进度节流，避免 100 模型时高频全页重绘
 const balanceRequests = new Map();                     // 每站一个余额请求，防止重复点击与迟到覆盖
 const modelListRequests = new Map();                   // 每站一个模型列表请求，防止与批测冲突
-const stationRevisions = new Map();                    // 配置变化后递增，丢弃旧请求的迟到响应
+const stationRevisions = new WeakMap();                 // 按站点对象保存版本，旧站点删除后可被 GC 回收
+let nextStationRevision = 1;
 const responseTimeouts = new WeakMap();                // AbortController 持续覆盖到响应体读取完成
 const responseTransports = new WeakMap();              // Response 实际使用的请求通道（不写入响应体）
 let modalTrigger = null;                               // 关闭弹窗后恢复焦点
@@ -266,12 +257,12 @@ function normalizeStations(list){
   });
 }
 
-// 加载本地数据：优先读 stations；无数据或解析失败则植入默认站
+// 加载本地数据；没有存储项或解析失败时保持空列表，不植入任何站点。
 function load(){
   try{
     const raw = readStored(LS_STATIONS);
-    // 仅在首次没有 key 时植入默认站；合法空数组代表用户主动删空，必须保留。
-    if(raw === null) seedDefault();
+    // 首次运行和用户主动删空都展示空状态，避免把任何具体站点写死在程序里。
+    if(raw === null) stations = [];
     else {
       const arr = JSON.parse(raw);
       if(!Array.isArray(arr)) throw new Error("stations 不是数组");
@@ -279,8 +270,8 @@ function load(){
     }
   }catch(e){
     // 不回写损坏原值，避免一次读取异常就覆盖用户尚可恢复的本地数据。
-    console.warn("读取中转站数据失败，当前会话使用默认站", e);
-    seedDefault(false);
+    console.warn("读取中转站数据失败，当前会话使用空站点列表", e);
+    stations = [];
   }
 
   // 只接受白名单字段及合法范围，避免导入或损坏缓存污染运行时状态。
@@ -381,15 +372,6 @@ function normalizeStation(source){
   };
 }
 
-// 首次无数据时植入默认「新疆-m」
-function seedDefault(persist=true){
-  const s = normalizeStation(Object.assign({ id:uid() }, DEFAULT_STATION));
-  s.order = 0;
-  s.status.connectivity = "unknown";
-  stations = [s];
-  if(persist) save();
-}
-
 // 持久化失败的统一告警：高频写入（测试进度、连通性诊断等）不应连续轰炸，
 // 故按 4 秒去重弹一次红色提示；调用方仍负责关键结构性操作的显式回滚。
 let warnPersistenceAt = 0;
@@ -410,17 +392,32 @@ function warnPersistence(kind){
 // 所以下面 5 个函数只是把 localStorage 换成 storage()，读写逻辑和调用点都不变。
 function storage(){ return window.aihubStore || window.localStorage; }
 function readStored(key){ return storage().getItem(key); }
-function writeStored(key, value){ storage().setItem(key, value); }
+function writeStoredMany(entries){
+  const store=storage();
+  if(typeof store.setItems==="function"){
+    store.setItems(entries);
+    return;
+  }
+  Object.entries(entries).forEach(([key,value])=>store.setItem(key,value));
+}
+function saveBundle(entries, warningKind="stations"){
+  try{
+    writeStoredMany(entries);
+    return true;
+  }catch(e){
+    console.warn("保存本地数据失败", e);
+    warnPersistence(warningKind);
+    return false;
+  }
+}
 
 
 // 持久化：仅写 stations / settings 两个 key
 function save(){
-  try{ writeStored(LS_STATIONS, JSON.stringify(stations)); return true; }
-  catch(e){ console.warn("保存中转站数据失败", e); warnPersistence("stations"); return false; }
+  return saveBundle({ [LS_STATIONS]:JSON.stringify(stations) }, "stations");
 }
 function saveSettings(){
-  try{ writeStored(LS_SETTINGS, JSON.stringify(settings)); return true; }
-  catch(e){ console.warn("保存设置失败", e); warnPersistence("settings"); return false; }
+  return saveBundle({ [LS_SETTINGS]:JSON.stringify(settings) }, "settings");
 }
 
 // 读取/保存只影响界面位置的状态。任何异常值都会被丢弃，且绝不包含站点凭据。
@@ -441,26 +438,26 @@ function loadUIState(){
     }
   }catch(_){ /* 损坏的 UI 状态不影响站点配置加载 */ }
 }
-function saveUIState(){
-  try{
-    const activeStationId = focusId || selectedId;
-    const selectedStationId = activeStationId && getById(activeStationId) ? activeStationId : null;
-    const selectedModelsOut = {};
-    selectedModelsByStation.forEach((models,id)=>{
-      if(getById(id) && Array.isArray(models) && models.length) selectedModelsOut[id] = models.slice(0,2000);
-    });
-    writeStored(LS_UI_STATE, JSON.stringify({ selectedStationId, selectedModelsByStation:selectedModelsOut }));
-    return true;
-  }catch(e){ console.warn("保存界面状态失败", e); warnPersistence("ui"); return false; }
+function serializeUIState(){
+  const activeStationId = focusId || selectedId;
+  const selectedStationId = activeStationId && getById(activeStationId) ? activeStationId : null;
+  const selectedModelsOut = {};
+  selectedModelsByStation.forEach((models,id)=>{
+    if(getById(id) && Array.isArray(models) && models.length) selectedModelsOut[id] = models.slice(0,2000);
+  });
+  return JSON.stringify({ selectedStationId, selectedModelsByStation:selectedModelsOut });
 }
-function rememberCurrentModelSelection(){
+function saveUIState(){
+  return saveBundle({ [LS_UI_STATE]:serializeUIState() }, "ui");
+}
+function rememberCurrentModelSelection(persist=true){
   const activeId = focusId || selectedId;
   if(!activeId || !getById(activeId)) return;
   const valid = new Set(getById(activeId).models.map(model=>model.id));
   const picked = [...selectedModels].filter(modelId=>valid.has(modelId));
   if(picked.length) selectedModelsByStation.set(activeId,picked);
   else selectedModelsByStation.delete(activeId);
-  saveUIState();
+  if(persist) saveUIState();
 }
 function snapshotModelSelectionState(){
   const byStation=new Map();
@@ -979,24 +976,43 @@ function toast(msg, type){
 }
 
 /* ---------------- 网络层 ---------------- */
-function stationRevision(id){ return stationRevisions.get(id) || 0; }
+function stationRevision(id){
+  const station=getById(id);
+  if(!station) return 0;
+  let revision=stationRevisions.get(station);
+  if(revision == null){
+    revision=nextStationRevision++;
+    stationRevisions.set(station,revision);
+  }
+  return revision;
+}
 function isCurrentStation(id, revision){ return !!getById(id) && stationRevision(id) === revision; }
 function invalidateStation(id){
-  stationRevisions.set(id, stationRevision(id) + 1);
+  const station=getById(id);
+  if(!station) return;
+  stationRevisions.set(station, stationRevision(id) + 1);
   modelDisplaySnapshots.delete(id);
   const timer=batchRefreshTimers.get(id);
   if(timer){ clearTimeout(timer); batchRefreshTimers.delete(id); }
+  // revision 失效后，旧请求即使仍在网络层收尾，也不应继续占着运行时 Map；
+  // 版本绑定到当前站点对象，即使之后复用同一个 ID，新对象也不会接收旧响应。
+  const revision=stationRevision(id);
+  [connectivityRequests, balanceRequests, modelListRequests].forEach(map=>{
+    const entry=map.get(id);
+    if(entry && entry.revision !== revision) map.delete(id);
+  });
+  const batchRevision=runningBatches.get(id);
+  if(batchRevision != null && batchRevision !== revision) runningBatches.delete(id);
+  const manual=manualModelTests.get(id);
+  if(manual && manual.revision !== revision) manualModelTests.delete(id);
   // 请求通道变更后，旧响应会因 revision 失效；同步撤销纯运行时的 testing 标记，
   // 防止已失效请求把模型永久留在“测试中”并锁死后续操作。
-  const station=getById(id);
-  if(station){
-    station.models.forEach(model=>{
-      if(model.test!=="testing") return;
-      model.test="idle";
-      model.latency=null;
-      model.err=null;
-    });
-  }
+  station.models.forEach(model=>{
+    if(model.test!=="testing") return;
+    model.test="idle";
+    model.latency=null;
+    model.err=null;
+  });
 }
 function scheduleRender(){
   // 拖拽中不替换列表/网格 DOM；网络请求可继续完成，结果在落下后一次性呈现。
@@ -1488,19 +1504,38 @@ function stationAuthHeaders(st, mode, originalHeaders={}){
   if(st && st.headers) Object.assign(headers, st.headers);
   return headers;
 }
+// 请求开始时复制所有会影响网络目标/鉴权的字段。站点对象会被编辑操作原地修改，
+// 若在 await 期间继续引用它，认证重试可能把新 Key 发到旧 URL。
+function stationRequestSnapshot(st){
+  if(!st || typeof st!=="object" || typeof st.id!=="string") return null;
+  return {
+    id:st.id,
+    baseurl:normalizeBaseUrl(st.baseurl),
+    apikey:normalizeApiKey(st.apikey),
+    balancePath:normalizeBalancePath(st.balancePath),
+    headers:st.headers && typeof st.headers==="object" ? { ...st.headers } : {},
+    authMode:st.authMode==="x-api-key" || (st.status && st.status.authMode==="x-api-key") ? "x-api-key" : "bearer"
+  };
+}
+function staleStationRequestError(){
+  const error=new Error("站点配置已变化，已取消旧请求");
+  error.aiHubStale=true;
+  return error;
+}
 // 部分网关按客户端指纹放行（401 "unauthorized client detected"）：浏览器直连的 User-Agent
 // 受 Chromium 限制无法伪造，无论页面写什么都带浏览器 UA，必然被拒。此时改走本地同源转发，
 // 由 Node 补写一个网关认可的 CLI 客户端 UA 重试一次；成功则把 UA 固化进站点自定义头，
 // 之后该站点所有请求自动走转发，不需要用户手工配置。
 const CLIENT_GATEWAY_UA = "claude-cli/2.0.0 (external, cli)";
 const CLIENT_DETECT_RE = /unauthorized[_\s-]?client|client[_\s-]?detect/i;
-async function healClientBlockedStation(st, url, mode, requestOptions, failedResponse, requestRevision=null){
+async function healClientBlockedStation(st, url, mode, requestOptions, failedResponse, requestRevision=null, requestSnapshot=null){
   const stationId=st && st.id;
   const revision=requestRevision == null && stationId ? stationRevision(stationId) : requestRevision;
   const isCurrent=()=>!!stationId && isCurrentStation(stationId, revision);
-  if(!st || !stationId || settings.proxy || !isCrossOriginHttpUrl(url) || !isCurrent()) return null;
+  const snapshot=requestSnapshot || stationRequestSnapshot(st);
+  if(!snapshot || !stationId || settings.proxy || !isCrossOriginHttpUrl(url) || !isCurrent()) return null;
   // 已配置 User-Agent 的站点说明用户已有明确意图，其 UA 被拒时不越权改写。
-  if(Object.keys(st.headers || {}).some(key=>key.toLowerCase()==="user-agent")) return null;
+  if(Object.keys(snapshot.headers || {}).some(key=>key.toLowerCase()==="user-agent")) return null;
   let signature="";
   try{ signature=(await failedResponse.clone().text()).slice(0,2000); }catch(e){}
   if(!CLIENT_DETECT_RE.test(signature)) return null;
@@ -1508,10 +1543,14 @@ async function healClientBlockedStation(st, url, mode, requestOptions, failedRes
   if(!isCurrent()) return null;
   if(!await checkLocalProxy()) return null;
   if(!isCurrent()) return null;
-  const relayOptions=stationRelayOptions({ ...st, headers:{ ...(st.headers||{}), "User-Agent":CLIENT_GATEWAY_UA } });
+  const relayStation={ ...snapshot, headers:{ ...(snapshot.headers||{}), "User-Agent":CLIENT_GATEWAY_UA } };
   let attempt;
   try{
-    attempt=await fetchWithTimeout(url, { ...requestOptions, ...relayOptions, headers:stationAuthHeaders(st,mode,requestOptions.headers||{}) });
+    attempt=await fetchWithTimeout(url, {
+      ...requestOptions,
+      ...stationRelayOptions(relayStation),
+      headers:stationAuthHeaders(relayStation,mode,requestOptions.headers||{})
+    });
   }catch(error){ return null; }
   if(!attempt.ok){
     await discardResponse(attempt);
@@ -1522,44 +1561,76 @@ async function healClientBlockedStation(st, url, mode, requestOptions, failedRes
     await discardResponse(attempt);
     return null;
   }
-  rememberRequestTransport(st, attempt, revision);
-  if(st.status && isCurrent()) st.status.authMode=mode;
-  st.headers={ ...(st.headers||{}), "User-Agent":CLIENT_GATEWAY_UA };
-  save();
+  const current=getById(stationId);
+  if(!current || !isCurrent()){
+    await discardResponse(attempt);
+    return null;
+  }
+  rememberRequestTransport(current, attempt, revision);
+  current.status.authMode=mode;
+  current.headers={ ...(current.headers||{}), "User-Agent":CLIENT_GATEWAY_UA };
   toast("该网关按客户端指纹放行（401 unauthorized client）：已自动为站点配置 User-Agent 并改走本地同源转发", "ok");
-  appendRequestLog(st,{
+  appendRequestLog(current,{
     level:"warn", kind:"自动修复", method:String(requestOptions.method||"GET").toUpperCase(), endpoint:url,
     transport:"builtin", latency:null,
     message:"客户端指纹被拒（unauthorized client），自动配置 User-Agent: "+CLIENT_GATEWAY_UA+" 并走本地转发后成功"
   });
+  save();
   return attempt;
 }
 
 // OpenAI 兼容通常是 Bearer，但一部分 Sub2API/New API 衍生网关仅接受 x-api-key。
 // 只在明确的认证失败（401/403）后切换一次，避免重复非幂等请求或掩盖其它真实错误。
 async function fetchStationApi(st, url, options={}, timeoutSeconds=settings.timeout){
-  const preferred=st && st.status && st.status.authMode === "x-api-key" ? "x-api-key" : "bearer";
-  const alternate=preferred === "bearer" ? "x-api-key" : "bearer";
   const { allowAuthRetry: requestedAuthRetry, requestRevision: requestedRevision, ...requestOptions } = options || {};
   // 调用方可传入固定版本；未传时也在本次调用开始时取快照，避免自动修复跨越配置变更。
-  const fixedRevision=requestedRevision == null && st && st.id ? stationRevision(st.id) : requestedRevision;
+  const snapshot=stationRequestSnapshot(st);
+  const stationId=snapshot && snapshot.id;
+  const fixedRevision=requestedRevision == null && stationId ? stationRevision(stationId) : requestedRevision;
+  if(!snapshot) throw new Error("站点配置无效");
+  const preferred=snapshot.authMode;
+  const alternate=preferred === "bearer" ? "x-api-key" : "bearer";
   const method=String(requestOptions.method || "GET").toUpperCase();
   // GET/HEAD 可安全地切换认证头；POST 等请求可能产生计费或副作用，禁止自动重发。
   const allowAuthRetry=requestedAuthRetry === true || (requestedAuthRetry !== false && ["GET","HEAD"].includes(method));
-  const request=mode=>fetchWithTimeout(url,{ ...requestOptions, ...stationRelayOptions(st), headers:stationAuthHeaders(st,mode,requestOptions.headers || {}) },timeoutSeconds);
+  const isCurrent=()=>fixedRevision == null || isCurrentStation(stationId,fixedRevision);
+  const request=mode=>{
+    if(!isCurrent()) return Promise.reject(staleStationRequestError());
+    return fetchWithTimeout(url,{
+      ...requestOptions,
+      ...stationRelayOptions(snapshot),
+      headers:stationAuthHeaders(snapshot,mode,requestOptions.headers || {})
+    },timeoutSeconds);
+  };
   let response=await request(preferred);
+  if(!isCurrent()){
+    await discardResponse(response);
+    throw staleStationRequestError();
+  }
   if(response.ok){
-    if(st && st.status && (fixedRevision == null || isCurrentStation(st.id, fixedRevision))) st.status.authMode=preferred;
+    const current=getById(stationId);
+    if(current && isCurrent()) current.status.authMode=preferred;
     return response;
   }
   if(!allowAuthRetry || (response.status!==401 && response.status!==403)) return response;
+  // 首次响应返回后用户可能已经编辑/删除站点；不要把第二种认证头发到旧 URL。
+  if(!isCurrent()){
+    await discardResponse(response);
+    throw staleStationRequestError();
+  }
   await discardResponse(response);
+  if(!isCurrent()) throw staleStationRequestError();
   response=await request(alternate);
-  if(response.ok && st && st.status && (fixedRevision == null || isCurrentStation(st.id, fixedRevision))) st.status.authMode=alternate;
+  if(!isCurrent()){
+    await discardResponse(response);
+    throw staleStationRequestError();
+  }
+  const current=getById(stationId);
+  if(response.ok && current && isCurrent()) current.status.authMode=alternate;
   // 两种认证头都被拒且网关明说「客户端不合法」时，大概率不是 Key 错，而是直连 UA 被指纹识别。
   // 401 响应说明上游没有执行任何操作，这里补带客户端 UA 经本地转发重试一次是安全的。
-  if(!response.ok && (response.status===401 || response.status===403)){
-    const healed=await healClientBlockedStation(st, url, preferred, requestOptions, response, fixedRevision);
+  if(!response.ok && (response.status===401 || response.status===403) && isCurrent()){
+    const healed=await healClientBlockedStation(st, url, preferred, requestOptions, response, fixedRevision, snapshot);
     if(healed) return healed;
   }
   return response;
@@ -1627,6 +1698,11 @@ function testConnectivity(id){
   }
   const promise = Promise.resolve().then(async()=>{
     const st = getById(id); if(!st) return { ok:false };
+    const requestSnapshot=stationRequestSnapshot(st);
+    if(!requestSnapshot) return { ok:false };
+    // 候选 URL、API Key 和自定义头都固定在本次诊断开始时，编辑站点后只让旧请求收尾，
+    // 不再把新配置发到旧目标。
+    const candidates=connectivityCandidates(requestSnapshot);
     setConn(id, "testing", null, null, revision);
     const started = performance.now();
     const errors=[];
@@ -1635,7 +1711,7 @@ function testConnectivity(id){
     let primaryUrl="";
     let diagnosticEndpoint="/v1/models";
     try{
-      for(const candidate of connectivityCandidates(st)){
+      for(const candidate of candidates){
         diagnosticEndpoint=candidate.path;
         if(!primaryUrl) primaryUrl=settings.proxy ? candidate.url : candidate.rawUrl;
         // 同一站点常见两种认证头：OpenAI 标准 Bearer 和部分网关的 x-api-key。
@@ -1646,8 +1722,8 @@ function testConnectivity(id){
           try{
             response=await fetchWithTimeout(candidate.url, {
               method:"GET",
-              headers:mode ? connectivityHeaders(st,mode) : {},
-              ...stationRelayOptions(st)
+              headers:mode ? connectivityHeaders(requestSnapshot,mode) : {},
+              ...stationRelayOptions(requestSnapshot)
             });
             if(!isCurrentStation(id, revision)){ await discardResponse(response); return { ok:false, stale:true }; }
               if(response.ok){
@@ -1664,14 +1740,14 @@ function testConnectivity(id){
             }
             const status=response.status;
             const transport=responseTransport(response);
-            const message=await responseError(response,st.apikey);
+            const message=await responseError(response,requestSnapshot.apikey);
             errors.push(candidate.path+"："+message);
             if(transport === "builtin" && (status===502 || status===504)) hardFailure=true;
             if(!(mode === "bearer" && candidate.requiresAuth && (response.status===401 || response.status===403))) break;
           }catch(error){
             if(!isCurrentStation(id, revision)) return { ok:false, stale:true };
             if(error && error.aiHubRelayUnavailable){
-              errors.push(candidate.path+"："+networkErrorMessage(error,st.apikey));
+              errors.push(candidate.path+"："+networkErrorMessage(error,requestSnapshot.apikey));
               hardFailure=true;
               break;
             }
@@ -1679,7 +1755,7 @@ function testConnectivity(id){
               corsBlocked=true;
               break;
             }
-            errors.push(candidate.path+"："+networkErrorMessage(error,st.apikey));
+            errors.push(candidate.path+"："+networkErrorMessage(error,requestSnapshot.apikey));
             if(error && error.message === "请求超时") hardFailure=true;
             break;
           }
@@ -1699,7 +1775,7 @@ function testConnectivity(id){
           toast("服务可达，但浏览器跨域限制了认证响应", "warn");
           return { ok:true, reachable:true, cors:true, latency };
         }
-        if(reachability.error) errors.push("跨域探测："+networkErrorMessage(reachability.error,st.apikey));
+        if(reachability.error) errors.push("跨域探测："+networkErrorMessage(reachability.error,requestSnapshot.apikey));
       }
       if(!isCurrentStation(id, revision)) return { ok:false, stale:true };
       const message=errors.length ? errors.slice(-4).join("；") : (corsBlocked ? "浏览器跨域限制，无法读取认证响应" : "未找到可用诊断接口");
@@ -1707,7 +1783,7 @@ function testConnectivity(id){
       return { ok:false, error:message };
     }catch(error){
       if(!isCurrentStation(id, revision)) return { ok:false, stale:true };
-      const message=networkErrorMessage(error,st.apikey);
+      const message=networkErrorMessage(error,requestSnapshot.apikey);
       setConn(id, "offline", null, message, revision, null, diagnosticEndpoint);
       return { ok:false, error:message };
     }
@@ -1787,26 +1863,29 @@ function balanceEndpointUrl(st, candidate){
 
 async function fetchBalanceRequest(id, revision){
   const st = getById(id); if(!st) return;
+  const requestSnapshot=stationRequestSnapshot(st);
+  if(!requestSnapshot) return;
+  const candidates=balanceCandidates(requestSnapshot);
   const errors=[];
   let lastReturned=null;
   let lastCandidatePath="";
-  for(const candidate of balanceCandidates(st)){
+  for(const candidate of candidates){
     lastCandidatePath=candidate.path;
     let response;
     try{
-      response = await fetchStationApi(st, buildUrl(balanceEndpointUrl(st, candidate)), { requestRevision:revision });
+      response = await fetchStationApi(requestSnapshot, buildUrl(balanceEndpointUrl(requestSnapshot, candidate)), { requestRevision:revision });
       if(!isCurrentStation(id, revision)){ await discardResponse(response); return; }
       const transport=rememberRequestTransport(st,response,revision);
       if(!response.ok){
-        errors.push(candidate.path + "：" + await responseError(response,st.apikey));
+        errors.push(candidate.path + "：" + await responseError(response,requestSnapshot.apikey));
         continue;
       }
       const data = await responseData(response);
       if(!isCurrentStation(id, revision)) return;
-      const result = await extractBalanceForCandidate(data, candidate, st, revision);
+      const result = await extractBalanceForCandidate(data, candidate, requestSnapshot, revision);
       if(!isCurrentStation(id, revision)) return;
       if(result){
-        setBalanceResult(st, result, data, candidate);
+        setBalanceResult(st, result, data, candidate, requestSnapshot.apikey);
         st.status.balanceError=null;
         appendRequestLog(st,{ level:"ok", kind:"余额查询", method:"GET", endpoint:candidate.path, latency:null, transport, message:balanceLabel(st)+"："+balanceDisplay(st) });
         save(); scheduleRender();
@@ -1817,7 +1896,7 @@ async function fetchBalanceRequest(id, revision){
       errors.push(candidate.path + "：未识别可用余额/额度字段");
     }catch(error){
       if(!isCurrentStation(id, revision)) return;
-      const message = networkErrorMessage(error,st.apikey);
+      const message = networkErrorMessage(error,requestSnapshot.apikey);
       errors.push(candidate.path + "：" + message);
       // 网络/CORS 与超时通常不是切换站内路径能解决的，避免连续等待三次超时。
       if(error instanceof TypeError || (error && error.aiHubRelayUnavailable) || message === "请求超时") break;
@@ -1831,7 +1910,7 @@ async function fetchBalanceRequest(id, revision){
     st.status.balanceUnit = null;
     st.status.balanceSource = lastReturned.candidate.source + " · " + lastReturned.candidate.path;
     st.status.balanceNote = null;
-    st.status.balanceRaw = sanitizeBalanceRaw(lastReturned.data,st.apikey);
+    st.status.balanceRaw = sanitizeBalanceRaw(lastReturned.data,requestSnapshot.apikey);
     st.status.balanceError=null;
     appendRequestLog(st,{ level:"warn", kind:"余额查询", method:"GET", endpoint:lastReturned.candidate.path, message:"接口已返回，但未识别可用余额字段" });
     save(); scheduleRender();
@@ -1976,7 +2055,7 @@ async function extractBalanceForCandidate(data, candidate, st, revision){
   }
   return extractGenericBalance(data);
 }
-function setBalanceResult(st, result, data, candidate){
+function setBalanceResult(st, result, data, candidate, apikey=st && st.apikey){
   st.status.balance=result.unlimited ? null : result.value;
   st.status.balanceKind=BALANCE_KINDS.has(result.kind) ? result.kind : "balance";
   st.status.balanceUnlimited=result.unlimited === true;
@@ -1984,7 +2063,7 @@ function setBalanceResult(st, result, data, candidate){
   st.status.balanceSource=candidate.source + " · " + candidate.path;
   st.status.balanceNote=text(result.note,240) || null;
   // 余额提取已经使用过原始 data；持久化时仅保留脱敏、受限大小的诊断副本。
-  st.status.balanceRaw=sanitizeBalanceRaw(data,st.apikey);
+  st.status.balanceRaw=sanitizeBalanceRaw(data,apikey);
   st.status.balanceError=null;
 }
 function balanceLabel(st){ return st.status.balanceKind === "quota" ? "可用额度" : "可用余额"; }
@@ -2023,6 +2102,8 @@ function fetchModels(id){
 }
 async function fetchModelsRequest(id, revision){
   const st = getById(id); if(!st) return;
+  const requestSnapshot=stationRequestSnapshot(st);
+  if(!requestSnapshot) return;
   if(isBatchRunning(id)){ toast("批量测试进行中，暂不能刷新模型列表", "warn"); return; }
   if(isManualModelTestRunning(id) || st.models.some(model=>model.test==="testing")){
     toast("模型测试进行中，暂不能刷新模型列表", "warn"); return;
@@ -2030,11 +2111,11 @@ async function fetchModelsRequest(id, revision){
   const requestStarted=performance.now();
   try{
     // 不读取也不修改连通性诊断状态：模型列表接口用自己的响应决定成败。
-    const response = await fetchStationApi(st, buildUrl(apiUrl(st.baseurl, "/v1/models")), { requestRevision:revision });
+    const response = await fetchStationApi(requestSnapshot, buildUrl(apiUrl(requestSnapshot.baseurl, "/v1/models")), { requestRevision:revision });
     if(!isCurrentStation(id, revision)){ await discardResponse(response); return; }
     const transport=rememberRequestTransport(st,response,revision);
     if(!response.ok){
-      const message=await responseError(response,st.apikey);
+      const message=await responseError(response,requestSnapshot.apikey);
       appendRequestLog(st,{ level:"error", kind:"模型列表", method:"GET", endpoint:"/v1/models", status:response.status, latency:performance.now()-requestStarted, transport, message });
       st.status.modelListError=message;
       st.status.modelListEmpty=false;
@@ -2088,7 +2169,7 @@ async function fetchModelsRequest(id, revision){
   }catch(error){
     if(isCurrentStation(id, revision)){
       const current=getById(id);
-      const message=networkErrorMessage(error,st.apikey);
+      const message=networkErrorMessage(error,requestSnapshot.apikey);
       if(current){
         appendRequestLog(current,{ level:"error", kind:"模型列表", method:"GET", endpoint:"/v1/models", latency:performance.now()-requestStarted, message });
         current.status.modelListError=message; current.status.modelListEmpty=false; save(); scheduleRender();
@@ -2111,7 +2192,10 @@ const DEPTH_PROBES = Object.freeze({
 const CAPABILITY_GRADE_LABELS = Object.freeze({ usable:"可用", limited:"受限", unusable:"不可用" });
 function probeToken(prefix){ return prefix + "-" + Math.random().toString(36).slice(2,8).toUpperCase(); }
 async function probeChat(st, payload, timeoutSeconds=settings.timeout, requestRevision=null){
-  const response = await fetchStationApi(st, buildUrl(apiUrl(st.baseurl, "/v1/chat/completions")), {
+  const snapshot=stationRequestSnapshot(st);
+  if(!snapshot) throw new Error("站点配置无效");
+  if(requestRevision != null && !isCurrentStation(snapshot.id,requestRevision)) throw staleStationRequestError();
+  const response = await fetchStationApi(snapshot, buildUrl(apiUrl(snapshot.baseurl, "/v1/chat/completions")), {
     method:"POST",
     headers:{ "Content-Type":"application/json" },
     body: JSON.stringify(payload),
@@ -2120,7 +2204,8 @@ async function probeChat(st, payload, timeoutSeconds=settings.timeout, requestRe
     allowAuthRetry: true,
     requestRevision
   }, timeoutSeconds);
-  rememberRequestTransport(st, response, requestRevision);
+  const current=getById(snapshot.id);
+  if(current) rememberRequestTransport(current, response, requestRevision);
   return response;
 }
 function chatChoice(data){
@@ -2197,6 +2282,7 @@ function adaptPayloadShape(ctx, payload, detail){
 }
 // 统一出口：!ok 时错误文本已在这里读出（响应体只能读一次），调用方直接用 result.error。
 async function sendProbeChat(st, ctx, payload, timeoutSeconds=settings.timeout){
+  const apikey=ctx && typeof ctx.apikey==="string" ? ctx.apikey : (st && st.apikey);
   let seconds = Math.max(Number(timeoutSeconds) || settings.timeout, ctx.timeoutFloor || 0);
   let lastError = "";
   let retried = false;
@@ -2207,7 +2293,7 @@ async function sendProbeChat(st, ctx, payload, timeoutSeconds=settings.timeout){
     try{
       response = await probeChat(st, shapedPayload(ctx, payload), seconds, ctx.revision);
     }catch(error){
-      const message = networkErrorMessage(error, st && st.apikey);
+      const message = networkErrorMessage(error, apikey);
       // 慢而可用的模型（尤其推理模型）在默认 15s 下必然超时。放宽一次窗口再试，
       // 只有第二次仍然超时才认为真的不可用。放宽结果记进 ctx，后续探针直接沿用。
       if(message === "请求超时" && !timeoutRetried){
@@ -2219,7 +2305,7 @@ async function sendProbeChat(st, ctx, payload, timeoutSeconds=settings.timeout){
       throw error;
     }
     if(response.ok) return { ok:true, response, ms:performance.now()-sentAt };
-    lastError = await responseError(response, st.apikey);
+    lastError = await responseError(response, apikey);
     if((response.status === 400 || response.status === 422) && adaptPayloadShape(ctx, payload, lastError.toLowerCase())) continue;
     if(PROBE_RETRY_STATUS.has(response.status) && !retried){
       retried = true;
@@ -2389,7 +2475,7 @@ const PROBE_RUNNERS = Object.freeze({
   },
   // 长上下文：口令放在靠前位置。声明了大窗口但实际从最旧内容开始截断的站点会在这里失败。
   async long(st, ctx){
-    const kb = clampInt(settings.longContextKB, LONG_CONTEXT_KB_MIN, LONG_CONTEXT_KB_MAX, DEFAULT_SETTINGS.longContextKB);
+    const kb = clampInt(ctx.longContextKB, LONG_CONTEXT_KB_MIN, LONG_CONTEXT_KB_MAX, DEFAULT_SETTINGS.longContextKB);
     const token = probeToken("NL");
     const filler = "这是一段用于填充上下文的占位文本，本身不含任何有效信息。";
     const target = kb * 1024;
@@ -2423,7 +2509,7 @@ async function runProbe(st, key, ctx){
     const state = outcome && outcome.skip ? "skip" : outcome && outcome.ok ? "pass" : "fail";
     return { key, state, ms:Math.round(performance.now()-started), detail: text(outcome && outcome.detail, PROBE_DETAIL_MAX) };
   }catch(error){
-    return { key, state:"fail", ms:Math.round(performance.now()-started), detail: text(networkErrorMessage(error, st && st.apikey), PROBE_DETAIL_MAX) };
+    return { key, state:"fail", ms:Math.round(performance.now()-started), detail: text(networkErrorMessage(error, ctx && ctx.apikey), PROBE_DETAIL_MAX) };
   }
 }
 // chat 失败说明这个模型根本用不了；其余探针失败只说明部分场景受限，仍可日常问答。
@@ -2443,10 +2529,13 @@ function capabilitySummary(capability){
 async function runCapabilitySuite(st, modelId, depth, alive, revision=null){
   const keys = DEPTH_PROBES[depth] || DEPTH_PROBES.basic;
   const suiteRevision=revision == null && st && st.id ? stationRevision(st.id) : revision;
+  const stationSnapshot=stationRequestSnapshot(st);
+  if(!stationSnapshot) return null;
   // shape/minTokens/timeoutFloor 在探针之间共享：chat 一旦协商出可用的请求形状或
   // 认出是推理模型，后续探针直接沿用，不再重复试探。
   const ctx = {
-    modelId, revision:suiteRevision, answered:false, reportedModel:"",
+    modelId, revision:suiteRevision, apikey:stationSnapshot.apikey, longContextKB:clampInt(settings.longContextKB, LONG_CONTEXT_KB_MIN, LONG_CONTEXT_KB_MAX, DEFAULT_SETTINGS.longContextKB),
+    answered:false, reportedModel:"",
     shape:{ dropTemperature:false, tokenField:"max_tokens", dropTokenLimit:false },
     minTokens:0, timeoutFloor:0,
     metrics:{ ttft:null, total:null, outputTokens:null, tps:null, chatMs:null }
@@ -2729,8 +2818,13 @@ function modelDisplayOrder(st){
 // 档位只影响下一次测试，不重排也不清空已有结果；换档后重新渲染是为了同步按钮提示文案。
 function setTestDepth(depth){
   if(!TEST_DEPTHS.has(depth) || settings.testDepth === depth) return;
+  const previous=settings.testDepth;
   settings.testDepth=depth;
-  saveSettings();
+  if(!saveSettings()){
+    settings.testDepth=previous;
+    toast("测试档位保存失败：本次切换已撤销","err");
+    return;
+  }
   render();
 }
 
@@ -2917,6 +3011,8 @@ function render(options={}){
   if(focusedStation){
     document.body.classList.add("focus-active");
     split.style.display="none"; grid.style.display="none"; focus.style.display="block";
+    document.getElementById("listPane").innerHTML = "";
+    grid.innerHTML = "";
     document.getElementById("detailPane").innerHTML = "";
     renderDetailInto(focus, focusedStation, true, { preserveModelAnchor:preserveModelAnchors });
     finishRender(scrollState,scrollTarget);
@@ -2932,9 +3028,12 @@ function render(options={}){
 
   if(settings.view==="grid"){
     split.style.display="none"; focus.style.display="none"; grid.style.display="grid";
+    document.getElementById("listPane").innerHTML = "";
+    document.getElementById("detailPane").innerHTML = "";
     renderGrid(grid);
   } else {
     grid.style.display="none"; focus.style.display="none"; split.style.display="flex";
+    grid.innerHTML = "";
     const visibleStations=filtered();
     const filtering=isSearchFiltered();
     let st=visibleStations.find(item=>item.id===selectedId) || null;
@@ -2944,7 +3043,7 @@ function render(options={}){
       st=visibleStations[0] || null;
       if(st) selectedId=st.id;
     }
-    renderListPane(st ? st.id : null);
+    renderListPane(st ? st.id : null, visibleStations);
     const dp = document.getElementById("detailPane");
     // 窄屏下详情被 CSS 隐藏，无需渲染（省开销）；宽屏才渲染右侧常驻详情
     if(isNarrow()){ /* 隐藏态，跳过 */ }
@@ -2970,9 +3069,8 @@ function emptyDetail(filteredOut=false){
 }
 
 // 列表左栏：标题操作、连续四格指标、URL 与固定高度 Key 轨道；展开只改变轨道内显示，不推动卡片布局。
-function renderListPane(activeId=selectedId){
+function renderListPane(activeId=selectedId, data=filtered()){
   const pane = document.getElementById("listPane");
-  const data = filtered();
   const orderingEnabled=!isSearchFiltered();
   const listHeader = `<div class="pane-head"><div><span class="pane-eyebrow">服务目录</span><strong>中转站</strong></div><div class="pane-tools"><button type="button" class="pane-locate" id="btnLocate" title="定位到当前站点" aria-label="定位到当前站点">${LOCATE_ICON}</button><span class="pane-count">${data.length}<small>个站点</small></span></div></div>`;
   const bindLocate=()=>{ const btn=document.getElementById("btnLocate"); if(btn) btn.onclick=()=>locateActiveStation(); };
@@ -3423,9 +3521,16 @@ function reorder(fromId, toId, after){
   if(targetIndex<0) return false;
   next.splice(after ? targetIndex+1 : targetIndex,0,from);
   if(next.every((station,index)=>station===previous[index])) return false;
+  const previousSnapshot=JSON.stringify(previous);
   stations=next;
   stations.forEach((station,index)=>{ station.order=index; });
-  save();
+  if(!save()){
+    // 拖拽排序属于结构性改动，写入失败时立即还原内存顺序，避免刷新前后看到两套结果。
+    stations=JSON.parse(previousSnapshot);
+    byOrder();
+    toast("排序保存失败：本地存储不可用，本次调整已撤销","err");
+    return false;
+  }
   return true;
 }
 
@@ -3614,7 +3719,7 @@ function detailHTML(st, isFocus){
         <div class="field"><label>API Key</label><div class="val">${apiKeyControlsMarkup(st,{detail:true,displayId:"dwKey",toggleId:"dwKeyToggle"})}</div></div>
         ${hasCustomHeaders(st)?`<div class="field wide" title="${esc(JSON.stringify(st.headers))}"><label>自定义请求头</label><div class="val"><span class="txt">${esc(Object.keys(st.headers).join("、"))}（在「编辑 → 高级选项」中修改）</span></div></div>`:""}
         ${st.group?`<div class="field"><label>分组</label><div class="val"><span class="txt">${esc(st.group)}</span></div></div>`:""}
-        ${st.note?`<div class="field wide"><label>备注</label><div class="val"><span class="txt">${esc(st.note)}</span></div></div>`:""}
+        ${st.note?`<div class="field wide field-note" title="${esc(st.note)}"><label>备注</label><div class="val"><span class="txt">${esc(st.note)}</span></div></div>`:""}
       </div>
     </div>
 
@@ -3975,6 +4080,7 @@ function doDelete(){
   const scrollState=focusId===deletingId ? (focusReturnScroll || captureScrollState()) : captureScrollState();
   // 删除是结构性变更，持久化失败需整体还原，否则刷新后“已删除”的站点又回来了却无人提示。
   const stationsSnapshot=JSON.stringify(stations);
+  const uiStateSnapshot=serializeUIState();
   const prevSelectedId=selectedId, prevFocusId=focusId, prevFocusReturnScroll=focusReturnScroll, prevFocusReturnStationId=focusReturnStationId;
   const selectionSnapshot=snapshotModelSelectionState();
   const revealedBeforeDelete=revealedApiKeyIds.has(deletingId);
@@ -3998,9 +4104,11 @@ function doDelete(){
     selectedModels.clear();
     if(selectedId) restoreModelSelection(selectedId);
   }
-  const uiOk=saveUIState();
-  const dataOk=save();
-  if(!dataOk || !uiOk){
+  const persisted=saveBundle({
+    [LS_UI_STATE]:serializeUIState(),
+    [LS_STATIONS]:JSON.stringify(stations)
+  }, "stations");
+  if(!persisted){
     // 还原全部结构性状态，保持删除弹窗打开以便用户处理存储问题后再试。
     stations=JSON.parse(stationsSnapshot);
     selectedId=prevSelectedId; focusId=prevFocusId; focusReturnScroll=prevFocusReturnScroll; focusReturnStationId=prevFocusReturnStationId;
@@ -4010,9 +4118,8 @@ function doDelete(){
     // 删除已使旧请求失效；恢复后清掉可能遗留的 testing 标记，但不丢掉原有展示顺序快照。
     invalidateStation(prevDeletingId);
     if(displaySnapshot) modelDisplaySnapshots.set(prevDeletingId,displaySnapshot);
-    // 两个存储键没有跨键事务；尽力把回滚后的内存状态补偿写回，避免只成功写入其中一个键。
-    save();
-    saveUIState();
+    // 尽力把回滚后的内存状态补偿写回，避免只成功写入其中一个键。
+    saveBundle({ [LS_STATIONS]:stationsSnapshot, [LS_UI_STATE]:uiStateSnapshot }, "stations");
     render({ scrollState });
     toast("删除失败：本地存储不可用（已满、只读或被禁用），请先导出备份再清理空间","err");
     return;
@@ -4123,6 +4230,7 @@ function importJSON(file){
       // 导入是结构性变更；持久化失败必须整体还原，避免刷新后导入项丢失却谎报成功。
       const prevStationsSnapshot=JSON.stringify(stations);
       const prevSettingsSnapshot=JSON.stringify(settings);
+      const prevUIStateSnapshot=serializeUIState();
       const prevSelectedId=selectedId, prevFocusId=focusId, prevFocusReturnScroll=focusReturnScroll, prevFocusReturnStationId=focusReturnStationId;
       stations = merged;
       // 导入可能替换同 ID 的密钥，完整显示状态不跨导入保留。
@@ -4138,10 +4246,12 @@ function importJSON(file){
       selectedModelsByStation = new Map();
       selectedModels.clear();
       restoreModelSelection(selectedId);
-      const dataOk=save();
-      const settingsOk=saveSettings();
-      const uiOk=saveUIState();
-      if(!dataOk || !settingsOk || !uiOk){
+      const persisted=saveBundle({
+        [LS_STATIONS]:JSON.stringify(stations),
+        [LS_SETTINGS]:JSON.stringify(settings),
+        [LS_UI_STATE]:serializeUIState()
+      }, "stations");
+      if(!persisted){
         // 还原导入前的全部状态并抛错走统一 catch，确保给出明确失败提示。
         stations=JSON.parse(prevStationsSnapshot);
         settings=normalizeSettings(JSON.parse(prevSettingsSnapshot));
@@ -4149,6 +4259,11 @@ function importJSON(file){
         selectedModelsByStation = new Map();
         selectedModels.clear();
         restoreModelSelection(selectedId);
+        saveBundle({
+          [LS_STATIONS]:prevStationsSnapshot,
+          [LS_SETTINGS]:prevSettingsSnapshot,
+          [LS_UI_STATE]:prevUIStateSnapshot
+        }, "stations");
         applyTheme(); updateThemeBtn(); render();
         throw new Error("本地存储不可用（已满、只读或被禁用），导入已回滚，请先清理空间再重试");
       }
@@ -4189,6 +4304,14 @@ function openSettings(){
 }
 function saveSettingsModal(){
   const settingsSnapshot=JSON.stringify(settings);
+  const stationsSnapshot=JSON.stringify(stations);
+  const previousDisplaySnapshots=new Map();
+  modelDisplaySnapshots.forEach((snapshot,id)=>{
+    if(snapshot && Array.isArray(snapshot.ids) && snapshot.keys instanceof Map){
+      previousDisplaySnapshots.set(id,{ ids:snapshot.ids.slice(), keys:new Map(snapshot.keys) });
+    }
+  });
+  const previousProxy=settings.proxy;
   applySettings({
     // 测试档位属于详情栏里的即时选择，设置窗口不提供改动项时必须保留当前值。
     testDepth: settings.testDepth,
@@ -4199,10 +4322,31 @@ function saveSettingsModal(){
     longContextKB: document.getElementById("s_longcontext").value,
     view: document.getElementById("s_view").value
   });
-  const dataOk=save();
-  const settingsOk=saveSettings();
-  if(!dataOk || !settingsOk){
+  const persisted=saveBundle({
+    [LS_STATIONS]:JSON.stringify(stations),
+    [LS_SETTINGS]:JSON.stringify(settings)
+  }, "settings");
+  if(!persisted){
+    const proxyChanged=previousProxy !== settings.proxy;
     settings=normalizeSettings(JSON.parse(settingsSnapshot));
+    stations=JSON.parse(stationsSnapshot);
+    if(proxyChanged){
+      // 代理切换期间的请求已被判定为旧版本，回滚时也要清掉旧的 testing 标记，
+      // 否则请求锁虽已失效，界面仍会显示“检测中”并阻塞后续操作。
+      stations.forEach(st=>{
+        invalidateStation(st.id);
+        if(st.status && st.status.connectivity==="testing"){
+          st.status.connectivity="unknown";
+          st.status.latency=null;
+          st.status.error=null;
+          st.status.transport=null;
+        }
+      });
+      modelDisplaySnapshots.clear();
+      previousDisplaySnapshots.forEach((snapshot,id)=>modelDisplaySnapshots.set(id,snapshot));
+    }
+    // 尽力把已经成功写入的一侧补回旧值。
+    saveBundle({ [LS_STATIONS]:stationsSnapshot, [LS_SETTINGS]:settingsSnapshot }, "settings");
     applyTheme(); updateThemeBtn(); render();
     toast("设置保存失败：本地存储不可用（已满、只读或被禁用），请先导出备份再清理空间","err");
     return;
@@ -4246,9 +4390,14 @@ function updateThemeBtn(){
 // 顶栏主题按钮：亮→暗→跟随系统 三态循环
 function cycleTheme(){
   const order = ["light","dark","system"];
-  const i = order.indexOf(settings.theme||"system");
+  const previous=settings.theme || "system";
+  const i = order.indexOf(previous);
   settings.theme = order[(i+1)%3];
-  saveSettings(); applyTheme(); updateThemeBtn();
+  if(!saveSettings()){
+    settings.theme=previous;
+    toast("主题保存失败：本次切换已撤销","err");
+  }
+  applyTheme(); updateThemeBtn();
 }
 
 /* ---------------- 顶栏更多菜单 ---------------- */
@@ -4320,10 +4469,37 @@ function bindGlobal(){
     const b = e.target.closest("button[data-view]"); if(!b) return;
     if(settings.view===b.dataset.view && !focusId) return;
     const scrollState=focusId ? (focusReturnScroll || captureScrollState()) : captureScrollState();
-    rememberCurrentModelSelection();
-    settings.view = b.dataset.view; saveSettings(); focusId=null; focusReturnScroll=null; focusReturnStationId=null; restoreModelSelection(selectedId); saveUIState(); render({ scrollState });
+    const previousSettingsSnapshot=JSON.stringify(settings);
+    const previousFocusId=focusId;
+    const previousFocusReturnScroll=focusReturnScroll;
+    const previousFocusReturnStationId=focusReturnStationId;
+    const selectionSnapshot=snapshotModelSelectionState();
+    const uiStateSnapshot=serializeUIState();
+    rememberCurrentModelSelection(false);
+    settings.view = b.dataset.view;
+    focusId=null;
+    focusReturnScroll=null;
+    focusReturnStationId=null;
+    restoreModelSelection(selectedId);
+    const persisted=saveBundle({
+      [LS_SETTINGS]:JSON.stringify(settings),
+      [LS_UI_STATE]:serializeUIState()
+    }, "settings");
+    if(!persisted){
+      settings=normalizeSettings(JSON.parse(previousSettingsSnapshot));
+      focusId=previousFocusId;
+      focusReturnScroll=previousFocusReturnScroll;
+      focusReturnStationId=previousFocusReturnStationId;
+      restoreModelSelectionState(selectionSnapshot);
+      // 尽力把已经成功写入的一侧补回旧值；失败时至少保持内存与当前视图一致。
+      saveBundle({ [LS_SETTINGS]:previousSettingsSnapshot, [LS_UI_STATE]:uiStateSnapshot }, "settings");
+      render({ scrollState });
+      toast("视图切换保存失败：本次切换已撤销","err");
+      return;
+    }
+    render({ scrollState });
   });
-  document.getElementById("search").addEventListener("input", render);
+  document.getElementById("search").addEventListener("input", scheduleRender);
   document.getElementById("btnAdd").onclick = ()=> openForm(null);
   document.getElementById("btnQuickImport").onclick = ()=> openForm(null, { quick:true });
   document.getElementById("quickImportParse").onclick = recognizeQuickImport;
@@ -4482,7 +4658,7 @@ load();
 // 首次打开默认选第一站；若 UI 状态中仍有有效站点，则保持用户上次选择。
 selectedId = getById(selectedId) ? selectedId : (stations.length ? stations[0].id : null);
 restoreModelSelection(selectedId);
-saveUIState();
+// 首次加载只读取配置，不重复回写完整 config.json；用户实际改变选择/视图时再保存。
 applyTheme();
 updateThemeBtn();
 bindGlobal();

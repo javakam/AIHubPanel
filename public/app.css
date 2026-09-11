@@ -91,9 +91,6 @@
   .brand-line{display:flex; align-items:center; gap:12px; flex-wrap:wrap}
   .brand h1{display:flex; align-items:center; gap:9px; font-size:19px; font-weight:800; margin:0; letter-spacing:0}
   .brand h1::before{content:""; width:25px; height:25px; border-radius:8px; flex:0 0 auto; background:linear-gradient(135deg,#c9bdff 0%,#8878ff 48%,#57c6ff 100%); box-shadow:0 7px 20px rgba(120,104,242,.42),inset 0 1px 0 rgba(255,255,255,.45)}
-  /* 版本固定贴近产品名，不与实时统计混在一起；发布时只需同步这里与 UE 规范。 */
-  .version-badge{display:inline-flex; align-items:center; min-height:22px; padding:2px 8px; border:1px solid rgba(178,166,255,.34); border-radius:999px; color:#d9d4ff; background:linear-gradient(135deg,rgba(142,124,255,.18),rgba(81,151,255,.11)); box-shadow:inset 0 1px 0 rgba(255,255,255,.08); font-family:var(--mono); font-size:12.5px; font-weight:760; letter-spacing:.035em; line-height:1; white-space:nowrap}
-  [data-theme="light"] .version-badge{color:#5146a8; border-color:rgba(91,81,221,.25); background:linear-gradient(135deg,rgba(111,94,235,.12),rgba(70,139,255,.08))}
   .brand .sub{font-size:13px; color:var(--dim2); margin:4px 0 0 34px; letter-spacing:.02em}
   .title-stats{display:flex; align-items:center; gap:5px; flex-wrap:wrap}
   .title-stat{
@@ -318,7 +315,8 @@
 
   .detail-head{display:flex; align-items:center; gap:12px; margin-bottom:0; padding:2px 2px 12px; flex-wrap:wrap}
   /* 状态与站点名保持紧凑标题组；站点名可自然换行，不挤压余额操作。 */
-  .detail-title{display:flex; align-items:center; gap:9px; flex:1 1 260px; min-width:0; flex-wrap:nowrap}
+  .detail-title{display:flex; align-items:flex-start; gap:9px; flex:1 1 260px; min-width:0; flex-wrap:nowrap}
+  .detail-title .badge{flex:0 0 auto; white-space:nowrap; margin-top:2px}
   .detail-head .d-name{flex:0 1 auto; min-width:0; font-size:22px; font-weight:820; letter-spacing:0; overflow-wrap:anywhere; word-break:break-word}
   .detail-head-actions{display:flex; align-items:center; gap:8px; margin-left:auto; flex:0 0 auto}
   .detail-head-actions .btn{min-inline-size:112px; justify-content:center}
@@ -351,6 +349,8 @@
   .field label{display:block; font-size:13px; color:var(--dim); margin-bottom:5px}
   .field .val{min-height:42px; font-family:var(--mono); font-size:13px; word-break:break-all; background:rgba(6,10,20,.32); border:1px solid rgba(184,197,255,.11); border-radius:11px; padding:5px 8px 5px 12px; display:flex; align-items:center; gap:4px}
   .field .val .txt{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .field-note .val{align-items:flex-start}
+  .field-note .val .txt{display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical; line-height:1.5; white-space:normal; overflow-wrap:anywhere}
   .field .val .api-key-inline{flex:1; max-width:100%}
   .field .val .api-key-inline .key-secret{flex:1}
   .field .val .api-key-inline.is-revealed .key-secret{max-height:none; white-space:nowrap}
@@ -611,11 +611,6 @@
   .brand h1{font-size:18px; font-weight:760; letter-spacing:0}
   .brand h1::before{width:24px; height:24px; border-radius:7px; background:var(--pri); box-shadow:none}
   .brand .sub{margin-left:33px; color:var(--dim2); font-size:13px}
-  .version-badge{
-    min-height:23px; padding:2px 8px; color:var(--pri-tx); border-color:var(--bd); background:var(--sf2);
-    box-shadow:none; font-weight:750; font-size:12.5px;
-  }
-  [data-theme="light"] .version-badge{color:var(--pri-tx-d); border-color:var(--bd); background:var(--sf2)}
   .title-stat{border-color:var(--bd); background:var(--sf2); color:var(--dim); font-size:13px}
   .title-stat b{color:var(--tx)}
   .title-stat.passed{background:var(--ok-soft); border-color:rgba(20,122,70,.18); color:var(--ok)}
@@ -849,7 +844,7 @@
   .list-pane .row-actions .btn:disabled{opacity:.4; cursor:default}
   .list-pane .row-metrics{display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:0; min-width:0; overflow:hidden; border:1px solid var(--bd); border-radius:11px; background:var(--sf2)}
   .list-pane .row-metric{
-    display:flex; flex-direction:column; align-items:flex-start; justify-content:center; gap:1px; min-width:0; min-height:42px; padding:5px 9px;
+    display:flex; flex-direction:column; align-items:stretch; justify-content:center; gap:1px; min-width:0; min-height:42px; padding:5px 9px; overflow:hidden;
     border:0; border-right:1px solid var(--bd); border-radius:0; background:transparent; text-align:left;
   }
   .list-pane .row-metric:last-child{border-right:0}

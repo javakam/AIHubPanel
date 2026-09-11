@@ -8,7 +8,7 @@
 
 数据全存在浏览器本地（localStorage），不经过任何第三方服务器。请求默认走浏览器自己的网络通道；碰到站点没开 CORS 的情况，可以启动自带的本地服务做同源转发。
 
-也提供了 Windows 桌面版（双击 exe 打开，不开浏览器、不依赖系统 Node），详见 `electron/` 目录和 `prompt.md` 施工手册。
+也提供了 Windows 桌面版（双击 exe 打开，不开浏览器、不依赖系统 Node）。开发和打包命令见下文，详见 `electron/` 目录和 `prompt.md` 施工手册。
 
 ## 运行
 
@@ -18,7 +18,7 @@
 node server.mjs
 ```
 
-默认监听 `http://127.0.0.1:4179`。Windows 下也可以双击 `start-aihubpanel.bat`，它会挑一个真正能用的端口、启动服务并自动打开浏览器。
+默认监听 `http://127.0.0.1:4179`。Windows 下也可以双击 `start-aihubpanel.bat`，它会挑一个真正能用的端口并启动服务；脚本默认不会自动打开浏览器，按提示手动访问输出的地址即可。确实需要自动打开时，可在运行前设置 `AI_HUB_OPEN_BROWSER=1`。
 
 如果启动报 `listen EACCES: permission denied`，说明这个端口被 Windows 整段预留了（Hyper-V / WSL / Docker 开机时申请，`netsh int ipv4 show excludedportrange protocol=tcp` 可以看到有哪些段）。换一个 `AI_HUB_PORT` 就行，bat 已经会自动换。注意面板数据存在浏览器 localStorage 里、按端口隔离，换端口后面板是空的——原有站点没丢，用面板的导出/导入搬过去即可。
 
@@ -72,3 +72,23 @@ electron/                Windows 桌面版（Electron）
 ```
 
 前端是原生 JavaScript，没有框架、没有构建步骤，改完刷新就能看效果。
+
+## Windows 桌面版
+
+开发运行：
+
+```bash
+npm start
+```
+
+生成单文件非安装版：
+
+```bash
+npm run dist
+```
+
+产物在 `electron/release/`：
+
+- `AIHubPanel-1.1.0.exe`：单文件非安装版，直接双击运行。
+
+打包脚本会先清空旧产物，构建完成后只保留这一个 exe。程序数据保存在运行时 exe 同级目录的 `config.json`；便携版启动时虽然会在临时目录解压运行文件，但配置仍写回用户实际双击的 exe 所在目录。该文件包含 API Key，请妥善保存。

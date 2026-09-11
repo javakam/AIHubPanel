@@ -1,13 +1,19 @@
 {
   "name": "aihubpanel-desktop",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "AIHubPanel 桌面版：Electron 壳 + 复用现有 server.mjs",
   "author": "AIHubPanel",
   "main": "electron/main.js",
   "scripts": {
+    "check": "node scripts/regression.mjs",
+    "test": "npm run check && npm run test:layout && npm run test:perf && npm run test:storage && npm run test:startup",
+    "test:layout": "electron scripts/layout-regression.cjs",
+    "test:perf": "electron scripts/perf-regression.cjs",
+    "test:storage": "electron scripts/storage-regression.cjs",
+    "test:startup": "electron scripts/startup-regression.cjs",
     "start": "electron .",
-    "dist": "electron-builder --win"
+    "dist": "node scripts/clean-release.mjs && electron-builder --win portable && node scripts/clean-release.mjs --keep-portable"
   },
   "devDependencies": {
     "electron": "44.1.1",
@@ -42,12 +48,11 @@
       "icon": "electron/icon.ico",
       "requestedExecutionLevel": "asInvoker",
       "target": [
-        "zip",
         "portable"
       ]
     },
     "portable": {
-      "artifactName": "AIHubPanel-${version}-portable.exe"
+      "artifactName": "AIHubPanel-${version}.exe"
     }
   }
 }
