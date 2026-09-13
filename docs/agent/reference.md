@@ -48,6 +48,12 @@
 - 判断手法：同一个节点在别处克隆并挂到同一父级下测量。克隆体走默认尺寸、原节点却停在旧尺寸，即可确认是动画而非级联或布局问题。
 - 因此布局回归的窄屏断言不依赖 `setContentSize` 立即生效，改为轮询 `innerWidth` 达标（scripts/layout-regression.cjs:41）。
 
+## 网关诊断坑
+- 验证网关的 CORS 支持必须带 `Origin` 请求头。实测 `api.b.ai` 只在请求带 `Origin` 时回 `Access-Control-Allow-Origin`，不带就完全没有该头；预检 `OPTIONS` 则返回 204 加 `ACAO: *`。用 curl 不带 Origin 去测会得出「网关没有 CORS、必然回退内置转发」的反向结论，而这个判断直接决定面板走直连还是转发（public/app.js:1308、1340）。
+- 内置转发是 Node 进程，不使用系统代理；`settings.proxy` 非空时还会直接禁用转发（public/app.js:1308）。所以「系统代理开着」不等于「转发兜底可用」：本机实测 `api.b.ai` 直连在 TCP 层就不通（25s 无握手，且 DNS 结果在 Facebook 网段与 74.86.12.172 之间跳），经 `127.0.0.1:7890` 正常。这类域名一旦走到转发，会一直等到 `AI_HUB_PROXY_TIMEOUT_MS`（默认 120000，server.mjs:21）才回 504；面板侧 15s 的 AbortController 先断开，用户看到的是「请求超时」。
+- `settings.proxy`（public/app.js:770）是 URL 前缀型转发（`?u=` 或 `{url}` 占位符），不是标准 HTTP 代理，不能把 `127.0.0.1:7890` 当系统代理填进去。
+- 只放行推理路径的网关（报错形如 `HTTP node only allows access to inference API paths`）会让余额查询的 5 个默认候选全部失败（public/app.js:88-94），其中 `/api/usage/token` 还会先返回 301。这类站点的余额在面板里取不到，属网关侧限制，调 `balancePath` 也无解。
+
 ## 关键依赖
 - 网页版无第三方依赖，Node 18+
 - 桌面版：electron 44.1.1、electron-builder 26.16.0（devDependency 固定）
