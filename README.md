@@ -6,7 +6,7 @@
 
 同时用好几个 API 中转站（New API、Sub2API 这类 OpenAI 兼容网关）的时候，想看余额、测哪些模型能用、确认 key 还没过期，得分别登录各家后台，来回切很烦。AIHubPanel 就是干这个的：填好 Base URL 和 API Key，连通性、余额、模型目录、单模型和批量模型测试都能在页面上直接点，结果汇总在一起看。
 
-数据全存在浏览器本地（localStorage），不经过任何第三方服务器。请求默认走浏览器自己的网络通道；碰到站点没开 CORS 的情况，可以启动自带的本地服务做同源转发。
+网页版数据全存在浏览器本地（localStorage），不经过任何第三方服务器。Windows 桌面版把普通配置和测试记录写在 exe 同级的 `config.json`，API Key 单独写在同级 `apikey.json`。请求默认走浏览器自己的网络通道；碰到站点没开 CORS 的情况，可以启动自带的本地服务做同源转发。
 
 也提供了 Windows 桌面版（双击 exe 打开，不开浏览器、不依赖系统 Node）。开发和打包命令见下文，详见 `electron/` 目录和 `prompt.md` 施工手册。
 
@@ -67,7 +67,7 @@ public/
   app.css
 electron/                Windows 桌面版（Electron）
   main.js                主进程：选端口、起 server.mjs、开窗口
-  preload.js             存储桥：config.json ↔ 渲染进程
+  preload.js             存储桥：config.json / apikey.json ↔ 渲染进程
   icon.png / icon.ico    应用图标
 ```
 
@@ -91,4 +91,4 @@ npm run dist
 
 - `AIHubPanel-1.1.0.exe`：单文件非安装版，直接双击运行。
 
-打包脚本会先清空旧产物，构建完成后只保留这一个 exe。程序数据保存在运行时 exe 同级目录的 `config.json`；便携版启动时虽然会在临时目录解压运行文件，但配置仍写回用户实际双击的 exe 所在目录。该文件包含 API Key，请妥善保存。
+打包脚本会先清空旧产物，构建完成后只保留这一个 exe。程序数据保存在运行时 exe 同级目录：普通配置和测试记录在 `config.json`，API Key 单独在 `apikey.json`。Electron 的缓存、日志和临时运行数据也尽量写入同级隐藏目录 `.aihubpanel-data`。便携版启动时虽然会在系统临时目录自解压，但业务数据仍写回用户实际双击的 exe 所在目录。两个 JSON 文件都请妥善保存，其中 `apikey.json` 尤其重要。

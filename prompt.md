@@ -7,7 +7,7 @@
 把现在的网页版包成 Windows 桌面 exe，做到三件事：
 
 1. 双击 exe 就打开面板，不用装 Node、不用开浏览器。
-2. 数据从浏览器 localStorage 挪到 **exe 同目录的明文 config.json**，用户随时能打开看、手工改。
+2. 数据从浏览器 localStorage 挪到 **exe 同目录的 config.json 和 apikey.json**：普通配置可手工改，API Key 单独保存。
 3. 前端界面和转发逻辑尽量不动，SSE 流式照常逐字返回。
 
 ## 二、为什么是 Electron（已定，别再纠结选型）
@@ -50,16 +50,16 @@
 
 ```
 Electron 主进程（main.js）
- ├─ 单实例锁：防止开两个实例抢 config.json
+ ├─ 单实例锁：防止开两个实例抢本地配置
  ├─ 与 Electron 初始化并行 import server.mjs，让系统直接分配空闲端口
  ├─ 等待 serverReady 返回真实端口 → 创建 BrowserWindow 加载 http://127.0.0.1:<端口>
  └─ preload.js 通过 contextBridge 暴露一个同步存储桥 window.aihubStore
-        └─ 内部用 Node 的 fs 同步读写 exe 同目录的 config.json
+        └─ 内部用 Node 的 fs 同步读写 exe 同目录的 config.json / apikey.json
 ```
 
 前端 app.js 的 5 个存储函数改成：检测到 `window.aihubStore` 就用它（桌面版），否则继续用 localStorage（网页版不回归）。
 
-config.json 结构（明文，对应 3 个 key）：
+config.json 结构（明文，不含 API Key，对应 3 个 key）：
 
 ```json
 {
@@ -85,13 +85,13 @@ config.json 结构（明文，对应 3 个 key）：
 
 ### 里程碑 1：存储切换【已完成 2026-09-02】
 
-- preload.js 里用 Node fs 同步读写 config.json，`contextBridge.exposeInMainWorld` 暴露 `getItem(key)` / `setItem(key, value)` / `setItems(items)`。
+- preload.js 里用 Node fs 同步读写 config.json / apikey.json，`contextBridge.exposeInMainWorld` 暴露 `getItem(key)` / `setItem(key, value)` / `setItems(items)`。
 - config.json 路径从主进程传进来（用 `webPreferences.additionalArguments` 传目录，preload 里从 `process.argv` 读）。
 - 前端 5 个存储函数加环境判断：有 `window.aihubStore` 走文件，没有走 localStorage。
 
-**验收**：桌面版添加一个站点，关闭重开数据还在；打开 exe 同目录的 config.json 能看到明文站点和设置；用浏览器打开同一份网页版，数据互不影响。
+**验收**：桌面版添加一个站点，关闭重开数据还在；exe 同目录的 `config.json` 不含 API Key，`apikey.json` 单独保存 Key；用浏览器打开同一份网页版，数据互不影响。
 
-实测结果：桥挂上后 `window.aihubStore` 只有 getItem / setItem 两个方法。用界面表单加一个站，关掉重开，站名、密钥、分组、自定义请求头全在；config.json 明文可读，stations / settings / uiState 三个字段齐全。手工改文件里的备注、再让程序写一次设置，手工改动没被覆盖。浏览器打开 4398 的网页版仍走 localStorage，操作前后 config.json 的 sha256 一字未变。写入耗时：uiState 约 0.9ms，站点数据约 3.4ms；造 10 站 × 40 模型带完整报告和日志（约 504KB）后单次 save 约 18ms。把 config.json 设成只读再存，`save()` 返回 false 并弹红字提示，文件没被改坏，也没留下 .tmp 残渣。
+实测结果：桥挂上后 `window.aihubStore` 继续保持原有读写接口。用界面表单加一个站，关掉重开，站名、密钥、分组、自定义请求头全在；`config.json` 的 stations / settings / uiState 三个字段齐全且不含 API Key，`apikey.json` 单独保存站点 Key。手工改普通配置、再让程序写一次设置，手工改动不会被覆盖。浏览器打开 4398 的网页版仍走 localStorage，操作前后桌面文件不受影响。旧版把 Key 写在 config.json 的数据会在首次读取时自动迁移。写入仍采用临时文件加改名，避免留下半截 JSON；写入失败会提示用户。
 
 三处比原计划多做的事，都是实测暴露出来的：写入用「临时文件 + 改名」，避免写一半断电留下半截 JSON（改名被占用时退回直接覆写）；每次读取先比 mtime 和大小，用户手工改过就重读，不拿旧缓存去覆盖；界面提示里的「浏览器存储」全改成「本地存储」，桌面版没有浏览器存储可言。
 
@@ -101,11 +101,11 @@ config.json 结构（明文，对应 3 个 key）：
 - `asarUnpack` 把 server.mjs 和 public/ 解出 asar：`import()` 一个 asar 里的 .mjs 会失败，静态文件也要真实存在。
 - 图标、单实例锁、应用名。
 
-**验收**：拿到一个独立 exe，拷到没装 Node 的机器（或换个目录）双击能开、能测、能存；config.json 出现在用户实际运行 exe 的同级目录。
+**验收**：拿到一个独立 exe，拷到没装 Node 的机器（或换个目录）双击能开、能测、能存；`config.json` 和 `apikey.json` 出现在用户实际运行 exe 的同级目录，缓存和临时运行数据也尽量写入同级 `.aihubpanel-data`。
 
 实测结果：`npm run dist` 只产出一个单文件 portable exe，存储桥在位，server.mjs 能从 asar.unpacked 里跑起来；启动速度和自解压开销记录在 `docs/agent/reference.md`。
 
-配置落盘位置由启动回归直接校验：进程实际可能跑在 `%TEMP%\<随机名>\AIHubPanel.exe`（portable 包自解压的位置，退出即删），但 config.json 生成在用户双击的那个 exe 旁边，由 `PORTABLE_EXECUTABLE_DIR` 或 `PORTABLE_EXECUTABLE_FILE` 指定。
+配置落盘位置由启动回归直接校验：进程实际可能跑在 `%TEMP%\<随机名>\AIHubPanel.exe`（portable 包自解压的位置，退出即删），但 `config.json`、`apikey.json` 和 `.aihubpanel-data` 生成在用户双击的那个 exe 旁边，由 `PORTABLE_EXECUTABLE_DIR` 或 `PORTABLE_EXECUTABLE_FILE` 指定。
 
 打包踩的两个坑：Windows 权限级别的键名是 `requestedExecutionLevel`（少个 ed 就报「configuration.win should be one of these: null」，完全看不出错在哪）；`electronDist` 指到 node_modules/electron/dist 才不会重新下那 150MB 的 electron。都记在 `docs/agent/reference.md`。
 

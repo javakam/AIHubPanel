@@ -110,6 +110,10 @@ async function main() {
       JSON.parse(window.aihubStore.getItem("aihub.stations.v2") || "null")?.length || 0
     `, true);
     assert(externalRead === payload.stations.length, "preload cache must notice an external config change", { externalRead });
+    const migratedConfig = JSON.parse(fs.readFileSync(path.join(configDir, "config.json"), "utf8"));
+    const migratedKeys = JSON.parse(fs.readFileSync(path.join(configDir, "apikey.json"), "utf8"));
+    assert(migratedConfig.stations.every(station => !Object.prototype.hasOwnProperty.call(station, "apikey")), "legacy config migration must remove API Key fields");
+    assert(migratedKeys.version === 1 && Object.keys(migratedKeys.keys || {}).length === payload.stations.length, "legacy config migration must create apikey.json");
 
     const timings = await win.webContents.executeJavaScript(`
       (() => {
@@ -138,9 +142,25 @@ async function main() {
     assert(timings.hasBatchApi, "desktop storage bridge must expose setItems");
 
     const saved = JSON.parse(fs.readFileSync(path.join(configDir, "config.json"), "utf8"));
+    const savedKeys = JSON.parse(fs.readFileSync(path.join(configDir, "apikey.json"), "utf8"));
     assert(Array.isArray(saved.stations) && saved.stations.length === payload.stations.length, "batch write lost station data");
     assert(saved.settings && saved.settings.concurrency === payload.settings.concurrency, "batch write lost settings");
     assert(saved.uiState && saved.uiState.selectedStationId === payload.uiState.selectedStationId, "batch write lost UI state");
+    assert(saved.stations.every(station => !Object.prototype.hasOwnProperty.call(station, "apikey") && !Object.prototype.hasOwnProperty.call(station, "apiKey")), "config.json must not contain station API Key fields");
+    assert(!JSON.stringify(saved).includes("sk-storage-fake-"), "config.json must not contain API Key values");
+    assert(savedKeys.version === 1 && savedKeys.keys && Object.keys(savedKeys.keys).length === payload.stations.length, "apikey.json must contain one key per station");
+
+    const updatedStations = payload.stations.map(station => ({
+      ...station,
+      apikey: station.id === payload.stations[0].id ? "" : station.apikey
+    }));
+    await win.webContents.executeJavaScript(`
+      window.aihubStore.setItem("aihub.stations.v2", ${JSON.stringify(JSON.stringify(updatedStations))})
+    `, true);
+    const afterKeyRemoval = JSON.parse(fs.readFileSync(path.join(configDir, "apikey.json"), "utf8"));
+    assert(!Object.prototype.hasOwnProperty.call(afterKeyRemoval.keys || {}, payload.stations[0].id), "clearing a station API Key must remove it from apikey.json");
+    const roundTripStations = JSON.parse(await win.webContents.executeJavaScript("window.aihubStore.getItem('aihub.stations.v2')", true));
+    assert(roundTripStations[0].apikey === "", "cleared API Key must stay cleared after reload");
     console.log(`storage passed: ${payload.stations.length} stations, ${payload.stations.reduce((total, station) => total + station.models.length, 0)} models, ${Buffer.byteLength(payloadText, "utf8")} config bytes, 3 writes ${timings.singleWritesMs.toFixed(1)}ms, batch ${timings.batchWriteMs.toFixed(1)}ms`);
   } finally {
     if (win && !win.isDestroyed()) win.destroy();

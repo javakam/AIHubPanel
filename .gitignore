@@ -16,6 +16,9 @@ node_modules/
 electron/dist/
 electron/release/
 config.json
+apikey.json
+.aihubpanel-data/
+*.json.tmp
 
 # 根目录交付件（打包副本，便于直接双击使用）
 /AIHubPanel-*.exe

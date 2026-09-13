@@ -2,6 +2,8 @@
 // 职责只有两件：把现有 server.mjs 在本进程里跑起来、开窗口加载它。
 // 转发和 SSE 流式全部由 server.mjs 和前端原样承担，这里不碰网络。
 const { app, BrowserWindow, Menu, shell, dialog } = require("electron");
+const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 
@@ -17,7 +19,7 @@ function trace(stage, label) {
   if (!TRACE_FILE) return;
   try {
     const line = `${Date.now()} +${String(Date.now() - T0).padStart(5)}ms ${stage} ${label}\n`;
-    require("node:fs").appendFileSync(TRACE_FILE, line);
+    fs.appendFileSync(TRACE_FILE, line);
   } catch { /* 诊断写不进去不影响启动 */ }
 }
 trace("main-start", "main.js 开始执行");
@@ -32,7 +34,7 @@ function appPath(...segments) {
   return full.includes(packed) ? full.replace(packed, `${path.sep}app.asar.unpacked${path.sep}`) : full;
 }
 
-// config.json 放 exe 同目录，用户打开程序所在文件夹就能看到、随手改。
+// config.json 和 apikey.json 放 exe 同目录，用户打开程序所在文件夹就能看到、随手改。
 // portable 包运行时会把自己解压到临时目录，app.getPath("exe") 指的是那个临时副本。
 // electron-builder portable 会提供 PORTABLE_EXECUTABLE_DIR；FILE 作为兼容兜底。
 // 开发态（npm start）的 exe 在 node_modules 里，配置写那儿等于丢文件，所以退回仓库根目录。
@@ -40,6 +42,41 @@ function configDir() {
   if (process.env.PORTABLE_EXECUTABLE_DIR) return path.resolve(process.env.PORTABLE_EXECUTABLE_DIR);
   if (process.env.PORTABLE_EXECUTABLE_FILE) return path.dirname(path.resolve(process.env.PORTABLE_EXECUTABLE_FILE));
   return app.isPackaged ? path.dirname(app.getPath("exe")) : path.join(__dirname, "..");
+}
+
+// Electron 默认把用户数据和缓存放到 C 盘。便携版配置已经在 exe 同级，
+// 这里把运行数据也放到同级隐藏目录，尽量不占用系统盘。
+// 单文件 portable 启动前的自解压仍由启动器写入系统临时目录，主进程无法提前接管。
+function configureRuntimePaths() {
+  const runtimeDir = path.join(configDir(), ".aihubpanel-data");
+  const tempDir = path.join(runtimeDir, "temp");
+  const paths = {
+    appData: path.join(runtimeDir, "app-data"),
+    userData: runtimeDir,
+    sessionData: path.join(runtimeDir, "session"),
+    temp: tempDir,
+    logs: path.join(runtimeDir, "logs"),
+    crashDumps: path.join(runtimeDir, "crash-dumps")
+  };
+  try {
+    fs.mkdirSync(tempDir, { recursive: true });
+  } catch (error) {
+    trace("runtime-dir-fallback", error instanceof Error ? error.message : String(error));
+    return null;
+  }
+  Object.entries(paths).forEach(([name, value]) => {
+    try { app.setPath(name, value); } catch { /* 某些 Electron 版本不允许覆盖个别系统路径。 */ }
+  });
+  try { app.setAppLogsPath(paths.logs); } catch { /* 日志路径已由 setPath 尽量接管。 */ }
+  app.commandLine.appendSwitch("disk-cache-dir", path.join(runtimeDir, "cache"));
+  app.commandLine.appendSwitch("media-cache-dir", path.join(runtimeDir, "media-cache"));
+  app.commandLine.appendSwitch("gpu-cache-dir", path.join(runtimeDir, "gpu-cache"));
+  process.env.TEMP = tempDir;
+  process.env.TMP = tempDir;
+  process.env.TMPDIR = tempDir;
+  trace("runtime-dir", runtimeDir);
+  trace("temp-dir", os.tmpdir());
+  return runtimeDir;
 }
 
 // server.mjs 只用 Node 内置模块，而主进程本身就是完整的 Node 环境，
@@ -85,7 +122,7 @@ function createWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      // preload 要用 fs 同步读写 config.json，sandbox 开着就 require 不到。
+      // preload 要用 fs 同步读写本地 JSON，sandbox 开着就 require 不到。
       sandbox: false,
       preload: path.join(__dirname, "preload.js"),
       // preload 拿不到 app 对象，配置目录只能从主进程传过去。
@@ -140,6 +177,7 @@ function loadPanel(port) {
 }
 
 // 单实例锁：两个实例会同时读写同一份配置文件，后写的会覆盖前写的。
+configureRuntimePaths();
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
