@@ -120,11 +120,14 @@ function originOf(value) {
   }
 }
 
+const LOOPBACK_ORIGIN_HOSTS = ["127.0.0.1", "localhost", "[::1]"];
+
 function isAllowedProxyOrigin(origin) {
   if (ALLOWED_PROXY_ORIGIN) return origin === ALLOWED_PROXY_ORIGIN;
-  return origin === `http://127.0.0.1:${listeningPort}` ||
-    origin === `http://localhost:${listeningPort}` ||
-    origin === `http://[::1]:${listeningPort}`;
+  // 两侧都按 URL 规范化再比。手工拼 `:${port}` 在默认端口上永远比不上：
+  // http://127.0.0.1:80 的 origin 会被序列化成 http://127.0.0.1（默认端口省略），
+  // AI_HUB_PORT=80 时整站转发会被自己的同源校验拒掉。
+  return LOOPBACK_ORIGIN_HOSTS.some(host => new URL(`http://${host}:${listeningPort}`).origin === origin);
 }
 
 // 只信任固定配置的 origin；绝不根据客户端可控的 Host 头动态推断允许源。
