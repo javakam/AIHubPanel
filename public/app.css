@@ -121,13 +121,16 @@
   .menu-item svg{width:16px; height:16px; flex:0 0 auto}
   .menu-quick-import{display:none}
   .view-toggle{display:flex; background:rgba(10,14,27,.56); border:1px solid var(--bd); border-radius:12px; padding:3px; box-shadow:inset 0 1px 0 rgba(255,255,255,.025)}
-  .view-toggle button{width:35px; height:31px; border-radius:8px; display:grid; place-items:center; color:var(--dim2); transition:.18s}
+  .view-toggle button{width:35px; height:31px; border-radius:8px; display:grid; place-items:center; color:var(--dim2); transition:background .18s,color .18s}
   .view-toggle button.active{background:linear-gradient(135deg,#927fff,#5a8bff); color:#fff; box-shadow:0 5px 13px rgba(81,105,243,.32)}
   .view-toggle button:not(.active):hover{color:var(--tx)}
   .search{position:relative}
   .search input{
     width:250px; max-width:46vw; height:40px; padding:0 13px 0 35px;
-    background:rgba(11,16,30,.62); border:1px solid var(--bd); border-radius:12px; outline:none; transition:.18s;
+    background:rgba(11,16,30,.62); border:1px solid var(--bd); border-radius:12px; outline:none;
+    /* 只过渡颜色类属性：transition 简写不带属性名等于 all，会把断点处的 width 变化也做成动画，
+       窗口不可见时动画时间轴不走，输入框就卡在旧宽度上撑破窄屏。 */
+    transition:background .18s,border-color .18s,box-shadow .18s;
   }
   .search input:focus{border-color:var(--pri); box-shadow:0 0 0 3px var(--pri-soft)}
   .search svg{position:absolute; left:11px; top:50%; transform:translateY(-50%); color:var(--dim2)}
@@ -521,7 +524,7 @@
   .form-row label{display:block; font-size:12.5px; color:var(--dim); margin-bottom:5px}
   .form-row input, .form-row textarea, .form-row select{
     width:100%; height:41px; padding:0 12px; background:rgba(5,9,19,.32); border:1px solid rgba(184,197,255,.14);
-    border-radius:11px; outline:none; transition:.18s;
+    border-radius:11px; outline:none; transition:background .18s,border-color .18s,box-shadow .18s;
   }
   .sensitive-input{position:relative}
   .sensitive-input input{font-family:var(--mono)}
