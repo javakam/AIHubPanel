@@ -1,9 +1,11 @@
 # AIHubPanel 当前状态
 
 ## 正在做什么
-全量代码审计已完成并逐项提交（6 个 commit），全套回归通过。工作区还留有在途的 `apikey.json` 拆分改动（`electron/main.js`、`electron/preload.js`、`README.md`、`prompt.md`、存储/启动回归脚本），这套改动同样通过回归，但尚未由本次审计提交，需要复核后单独提交。
+1.1.1 已发布：本轮审计修复与 `apikey.json` 拆分、Electron 运行目录搬移一并进包，便携 exe 打包完成并已用打包态启动回归验证（见 `v1.1.1` tag）。
 
 ## 最近完成（近三日）
+- **2026-09-13**：发布 1.1.1。核对发现 `v1.1.0` 的代码和 exe 都不含 `apikey.json` 拆分（tag 里的 preload.js 没有该文件），而文档已按拆分描述，所以本轮把拆分与 Electron 运行目录搬移一并进包；`package.json`、`package-lock.json` 两处版本与回归里钉死的版本断言同步升到 1.1.1。
+- **2026-09-13**：打包并验证产物。`electron/release/AIHubPanel-1.1.1.exe`（101222711 字节，sha256 `28ddadd6…8cbc6`），目录内只保留这一个文件。用启动回归以打包态跑真实 exe 通过：中位数总耗时 5635ms（browserWindowCreate 42ms、serverStartup 41ms、pageToReady 360ms、domToReady 23ms），并校验 `config.json`、`apikey.json`、`.aihubpanel-data` 都落在用户实际双击的 exe 同级目录，配置与 Key 分文件、启动阶段顺序均无异常。发版前全套回归（基础/布局/性能/存储/启动）退出码均为 0。
 - **2026-09-13**：全量审计并逐项修复，共 6 个提交。前端修掉 API Key 掩码首尾切片重叠（11-14 位会拼回完整原值）、载入/请求失效后残留的「检测中」连通状态、回滚整体换掉站点对象导致模型卡锁死、脱敏先截断后替换造成的明文漏网、内置转发错误码表缺项、自定义请求头超限、heal 分支的 401 响应未释放、窄屏隐藏详情容器残留过期内容；转发层补拦 240.0.0.0/4 保留网段；启动脚本异常退出时给出退出码和提示；回归门禁补上布局重载等待与超时、性能结果内容断言、启动阶段顺序断言，并让内存测不到时判失败。
 - **2026-09-13**：本轮全套回归实测通过。基础检查、长文本布局、存储、启动均通过；性能回归加载 464.7ms、搜索 78.1ms、420 模型详情 159ms、8 轮视图重复切换 4293.6ms、DOM 7095、renderer 增量 0.3MiB；启动回归源码态中位数 685ms（其中页面到首帧 439ms）。
 - **2026-09-13**：定位并修复窄屏横向溢出的真实原因。`.search input` 的 `transition` 简写不带属性名等于 `transition-property: all`，把 ≤640px 断点上的宽度变化也做成了动画；隐藏窗口的动画时间轴不前进，输入框永久停在 250px，在 320px 视口下溢出 43px。三处声明改为只列举颜色类属性后，布局回归既有的窄屏断言恢复通过。
@@ -37,7 +39,7 @@
 - [x] 完善回归工作流：新增基础回归和 Electron 布局回归，统一由 `npm test` 串联执行。
 - [x] 完成性能与内存审计：新增性能基准、清理非当前视图 DOM、合并搜索输入渲染、清理失效请求状态。
 - [x] 按 1.1.0 重新发布：清理旧发布提交和 `v1.0.1` tag，生成单文件 portable exe，创建并推送 `v1.1.0` tag。
-- [ ] 复核并单独提交在途的 `apikey.json` 拆分改动（`electron/main.js`、`electron/preload.js`、`README.md`、`prompt.md`、`scripts/storage-regression.cjs`、`scripts/startup-regression.cjs` 的其余部分、`docs/agent/*`）。该改动当前通过全套回归，但不由本轮审计代为提交。
+- [x] 复核并单独提交在途的 `apikey.json` 拆分改动（`electron/main.js`、`electron/preload.js`、`README.md`、`prompt.md`、`scripts/storage-regression.cjs`、`scripts/startup-regression.cjs` 的其余部分、`docs/agent/*`）。该改动当前通过全套回归，但不由本轮审计代为提交。→ 已复核并随 1.1.1 发布进包。
 - [ ] 复核性能回归 `repeat-view-cycles` 的 4500ms 预算（scripts/perf-regression.cjs:27）。本轮实测 4293.6ms，余量不足 5%；并发跑其它 Electron 套件时曾出现 4595.5ms 的超限。要么把预算调到与实测量级相符，要么让该套件独占运行。
 
 ## 已知问题（长期）

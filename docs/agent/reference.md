@@ -8,7 +8,7 @@
 - 性能 / 内存回归：`npm run test:perf`，使用隔离 Electron profile 和合成站点数据，复验渲染耗时、DOM 数量、横向溢出和 renderer 内存变化
 - 桌面版开发：`npm start`（等同 `electron .`，空闲端口，不抢 4398）
 - 桌面版首次装：`npm install`。electron 二进制另拉约 150MB，镜像固定在 .npmrc
-- 桌面版打包：`npm run dist` → `electron/release/AIHubPanel-1.1.0.exe`（单文件非安装版）；脚本会清理旧的 `electron/release/` 内容，完成后只保留这一个 exe
+- 桌面版打包：`npm run dist` → `electron/release/AIHubPanel-1.1.1.exe`（单文件非安装版）；脚本会清理旧的 `electron/release/` 内容，完成后只保留这一个 exe
 - 桌面版数据：exe 同级 `config.json` 保存普通配置和测试记录，`apikey.json` 单独保存 API Key；Electron 缓存、日志和临时运行数据在同级 `.aihubpanel-data/`
 - Git Bash 里 `npm` 不在 PATH，用 `"/c/Program Files/AutoClaw/resources/node/node_modules/npm/bin/npm"`
 - 若 `npm` 完全不可用，可直接跑底层脚本，等价于对应 npm script：基础回归 `node scripts/regression.mjs`，其余四个套件 `node node_modules/electron/cli.js scripts/<名字>.cjs`
@@ -17,6 +17,8 @@
 - 量法：设 `AIHUB_BOOT_TRACE=<路径>` 再启动，主进程逐段写「绝对时间戳 + 阶段名」（electron/main.js:22）；不设置时不写诊断日志，正常启动无额外开销
 - 合成负载：60 个站点、2190 个模型、335901 字节配置；启动回归使用隔离 Electron profile，不读取根目录 `config.json`
 - 1.1.0 单文件非安装版：启动回归会复制 exe 到临时测试目录，验证 portable 启动器实际把配置目录和运行目录指向 exe 同级目录；本轮三次总耗时约 6.6/8.0/8.2 秒，中位数约 8.0 秒
+- 1.1.1 单文件非安装版（打包态实测，`AIHUB_STARTUP_EXECUTABLE` 指向真实 exe）：中位数总耗时 5635ms，browserWindowCreate 42ms、serverStartup 41ms、pageToReady 360ms、domToReady 23ms；同时校验 `config.json`/`apikey.json` 分文件落盘与 `.aihubpanel-data` 运行目录都在 exe 同级
+- 比较 1.1.0 与 1.1.1 的便携启动耗时要先排除机器负载：同日的性能回归重复切换耗时在 3.0–4.6s 之间波动，上面两组数字只在各自当次环境下可比
 - 应用自身耗时（main.js → 窗口显示）：源码回归中位数约 0.638s；服务启动约 39-40ms，页面导航到首帧约 0.38-0.41s
 - 前端：合成负载下 responseEnd 47-67ms，DOMContentLoaded 308-330ms（首次载入还会受 Electron 冷启动影响）
 - 优化点：窗口创建与 `await serverPromise` 并行（electron/main.js:162-163）+ 由 `serverReady` 直接返回监听状态
@@ -28,6 +30,8 @@
 - `electronLanguages` 只留 en-US 和 zh-CN
 - Windows 权限级别键名是 `requestedExecutionLevel`（不是 requestExecutionLevel）
 - `win.target` 只保留 `["portable"]`，artifactName 为 `AIHubPanel-${version}.exe`
+- 发版改版本号要同步四处，漏改会让门禁或产物名对不上：`package.json`、`package-lock.json` 的根包（两处，第 3 行和第 9 行）、README 里的产物名、以及 `scripts/regression.mjs:136` 钉死的版本断言（不改这一处 `npm run check` 会直接失败）
+- `electron-builder` 的 nsis / 7zip / nsis-resources 已在 `%LOCALAPPDATA%\electron-builder\Cache`，打包不必联网下载这些；本机没有 npm 时直接跑 `node scripts/clean-release.mjs && node node_modules/electron-builder/cli.js --win portable && node scripts/clean-release.mjs --keep-portable`，与 `npm run dist` 等价
 
 ## Windows 保留端口段
 - `netsh int ipv4 show excludedportrange protocol=tcp` 查看被系统预留的段
