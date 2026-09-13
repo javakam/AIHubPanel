@@ -201,8 +201,9 @@ function layoutProbe(label) {
     .find(element => (element.textContent || "").includes("超长站点名称"));
   const balanceMetric = row && row.querySelectorAll(".row-metric")[1];
   const balanceValue = balanceMetric && balanceMetric.querySelector(".m-val");
-  const metricRect = balanceMetric && balanceMetric.getBoundingClientRect();
-  const valueRect = balanceValue && balanceValue.getBoundingClientRect();
+  const metricsRow = row && row.querySelector(".row-metrics");
+  const metricsRowRect = metricsRow && metricsRow.getBoundingClientRect();
+  const metricCells = metricsRow ? [...metricsRow.querySelectorAll(".row-metric")] : [];
   const noteField = document.querySelector(".field-note");
   return {
     label,
@@ -215,7 +216,14 @@ function layoutProbe(label) {
     balance: {
       metric: info(balanceMetric),
       value: info(balanceValue),
-      exceedsMetric: !!(metricRect && valueRect && (valueRect.right > metricRect.right + 1 || valueRect.left < metricRect.left - 1))
+      // .m-val 是 display:block + overflow:hidden，宽度恒等于父级内容盒，
+      // 比「值盒子越过格子边界」永远为假，抓不到任何回归。真正会坏的是四格指标区
+      // 被超长余额撑出容器，所以比的是格子边界与容器边界。
+      cellCount: metricCells.length,
+      cellsInsideRow: !!metricsRowRect && metricCells.every(cell => {
+        const rect = cell.getBoundingClientRect();
+        return rect.left >= metricsRowRect.left - 1 && rect.right <= metricsRowRect.right + 1;
+      })
     },
     note: {
       field: info(noteField),
@@ -287,13 +295,13 @@ async function main() {
     await resizeTo(win, 1280, 900);
     const desktop = await collect(win, "desktop-list");
     assert(desktop.badge && desktop.badge.rect.width >= 70 && desktop.badge.rect.height <= 36, "desktop badge must stay one line", desktop.badge);
-    assert(!desktop.balance.exceedsMetric, "desktop balance must not overflow its metric cell", desktop.balance);
+    assert(desktop.balance.cellCount >= 1 && desktop.balance.cellsInsideRow, "desktop balance must stay inside the metrics row", desktop.balance);
     assert(desktop.page.scrollWidth <= desktop.page.clientWidth + 2, "desktop page must not have horizontal overflow", desktop.page);
 
     await resizeTo(win, 320, 720);
     const mobileList = await collect(win, "mobile-list");
     assert(mobileList.page.innerWidth <= 400, "mobile list probe must run at the narrow viewport", mobileList.page);
-    assert(!mobileList.balance.exceedsMetric, "mobile balance must not overflow its metric cell", mobileList.balance);
+    assert(mobileList.balance.cellCount >= 1 && mobileList.balance.cellsInsideRow, "mobile balance must stay inside the metrics row", mobileList.balance);
     assert(mobileList.page.scrollWidth <= mobileList.page.clientWidth + 2, "mobile list must not have horizontal overflow", mobileList.page);
 
     await win.webContents.executeJavaScript(`document.querySelector(".station-open").click()`, true);

@@ -29,6 +29,8 @@ const LIMITS_MS = new Map([
 ]);
 const MAX_DOM_NODES = 18000;
 const MAX_REPEAT_RENDERER_DELTA_MIB = 120;
+// 性能回归里有多个 await 窗口事件和页面脚本，任何一步不回来都会让 npm test 无声挂死。
+const WATCHDOG_MS = Number(process.env.AIHUB_PERF_WATCHDOG_MS) || 180000;
 
 app.setPath("userData", TEMP_USER_DATA);
 app.commandLine.appendSwitch("disable-gpu");
@@ -37,6 +39,16 @@ app.commandLine.appendSwitch("js-flags", "--expose-gc");
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// 等页面事件不能只等 promise：did-finish-load 不回来就是无限挂起，
+// 报错里要能看出卡在哪一步，而不是只看到看门狗超时。
+function withTimeout(promise, ms, label) {
+  let timer = null;
+  const guard = new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, guard]).finally(() => clearTimeout(timer));
 }
 
 function assert(condition, message, details) {
@@ -288,7 +300,7 @@ async function loadSeededPage(win, baseUrl) {
   const loaded = new Promise(resolve => win.webContents.once("did-finish-load", resolve));
   const started = performance.now();
   await win.webContents.executeJavaScript(storageScript, true);
-  await loaded;
+  await withTimeout(loaded, 30000, "seeded page reload");
   await delay(160);
   console.log(`perf phase: seeded page ready (${Math.round(performance.now() - started)}ms)`);
   return {
@@ -314,7 +326,11 @@ async function installFastFrameScheduler(win) {
 function asMiB(value) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric) || numeric <= 0) return null;
-  return numeric > 1024 * 1024 ? numeric / 1024 / 1024 : numeric / 1024;
+  // Electron 的 getAppMetrics 里这几个字段单位就是 KB。原来的写法在数值大于 1048576
+  // （1 GiB）时会误判成字节再除两次：1.2 GiB 的渲染进程读成 1.2 MiB，120 MiB 的
+  // 泄漏门禁永远不会失败。这里固定按 KB 换算，量纲明显不对时宁可返回 null 让门禁失败。
+  const mib = numeric / 1024;
+  return mib <= 1024 * 1024 ? mib : null;
 }
 
 function roundMiB(value) {
@@ -390,9 +406,12 @@ function assertTimings(results) {
     if (result.label === "search-clear") assert(result.rows === STATION_COUNT && result.models === HEAVY_MODEL_COUNT, "clearing the search must restore every station row and the selected station's models", result);
     if (result.label === "select-normal-detail") assert(result.selectedId === "station-005" && result.models === NORMAL_MODEL_COUNT, "selecting a normal station must render that station's full model list", result);
     if (result.label === "select-heavy-detail") assert(result.selectedId === "station-000" && result.models === HEAVY_MODEL_COUNT, "selecting the heavy station must render its full model list", result);
-    if (result.label === "switch-grid") assert(result.rows === 0 && result.models === 0, "grid view must release list/detail markup", result);
-    if (result.label === "switch-list") assert(result.cards === 0, "list view must release grid markup", result);
-    if (result.label === "mobile-focus-heavy") assert(result.rows === 0 && result.cards === 0, "focus view must release list/grid markup", result);
+    // 只比「上一屏的 DOM 没了」是不够的：整屏都没渲染也同样满足，那一刻当然最快。
+    // 每一步都要同时确认目标视图真的画出来了。
+    if (result.label === "switch-grid") assert(result.cards === STATION_COUNT && result.rows === 0 && result.models === 0, "grid view must render every station card and release list/detail markup", result);
+    if (result.label === "switch-list") assert(result.rows === STATION_COUNT && result.cards === 0, "list view must render every station row and release grid markup", result);
+    if (result.label === "mobile-focus-heavy") assert(result.focus === true && result.rows === 0 && result.cards === 0, "focus view must actually open and release list/grid markup", result);
+    if (result.label === "repeat-view-cycles") assert(result.rows === STATION_COUNT && result.models === HEAVY_MODEL_COUNT, "repeated view cycles must end on a fully rendered list", result);
   });
 }
 
@@ -423,6 +442,10 @@ function summarize(results, memoryDeltaMiB) {
 }
 
 async function main() {
+  const watchdog = setTimeout(() => {
+    console.error(`perf regression watchdog fired after ${WATCHDOG_MS}ms`);
+    app.exit(1);
+  }, WATCHDOG_MS);
   const port = await getFreePort();
   const baseUrl = `http://127.0.0.1:${port}`;
   const server = startPanelServer(port);
@@ -492,6 +515,7 @@ async function main() {
       }
     }, null, 2));
   } finally {
+    clearTimeout(watchdog);
     if (win && !win.isDestroyed()) win.destroy();
     if (server.exitCode === null) server.kill();
     app.quit();
