@@ -35,12 +35,31 @@ function stampOf(file) {
   }
 }
 
+function readJsonSource(file) {
+  const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+}
+
+// 文件被写坏（断电、被外部编辑器截断）时，上一次走「改名失败退回覆写」留下的 .bak
+// 是唯一还能找回全部站点和 Key 的东西。这里读到坏文件就退回备份并重新落盘，
+// 否则界面会当成「一个站点都没有」，用户随手保存一次就把磁盘上的数据彻底覆盖掉。
+// 主文件不存在时不看备份：删掉 config.json 就是明确的「重置」，不该被备份复活。
 function readJson(file) {
   try {
-    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    fs.accessSync(file);
   } catch {
     return {};
+  }
+  try {
+    return readJsonSource(file);
+  } catch {
+    try {
+      const recovered = readJsonSource(`${file}.bak`);
+      writeJsonAtomic(file, recovered);
+      return recovered;
+    } catch {
+      return {};
+    }
   }
 }
 
@@ -50,9 +69,12 @@ function normalizeApiKeys(source) {
     : {};
   const keys = {};
   Object.entries(input).forEach(([id, value]) => {
+    // 读侧只校验类型。长度和不可见字符由前端 normalizeApiKey 在写入侧把关，
+    // 这里再筛一遍等于把 apikey.json 里真实存在的 Key 悄悄丢掉，
+    // 紧接着的一次保存就会把它从文件里抹掉——读路径不该销毁数据。
     if (typeof id !== "string" || !id || typeof value !== "string") return;
     const key = value.trim();
-    if (key && key.length <= 2048 && !/[\u0000-\u001f\u007f]/.test(key)) keys[id] = key;
+    if (key) keys[id] = key;
   });
   return keys;
 }
@@ -69,15 +91,18 @@ function splitStationKeys(list, previousKeys) {
   const stations = Array.isArray(list) ? list : [];
   const activeIds = new Set();
   const cleanStations = stations.map(station => {
-    const source = station && typeof station === "object" && !Array.isArray(station) ? station : {};
+    const source = station && typeof station === "object" && !Array.isArray(station) ? { ...station } : {};
     const id = typeof source.id === "string" ? source.id : "";
-    if (id) activeIds.add(id);
-    if (id && Object.prototype.hasOwnProperty.call(source, "apikey")) {
-      const key = typeof source.apikey === "string" ? source.apikey.trim() : "";
-      if (key) keys[id] = key;
-      else delete keys[id];
-    } else if (id && Object.prototype.hasOwnProperty.call(source, "apiKey")) {
-      const key = typeof source.apiKey === "string" ? source.apiKey.trim() : "";
+    if (!id) {
+      // 没有可用 id 的站点挂不到 apikey.json 的某个键上。原样保留它的 Key 字段，
+      // 不能让「拆不出去」变成「直接丢掉」。
+      return source;
+    }
+    activeIds.add(id);
+    const field = Object.prototype.hasOwnProperty.call(source, "apikey") ? "apikey"
+      : (Object.prototype.hasOwnProperty.call(source, "apiKey") ? "apiKey" : "");
+    if (field) {
+      const key = typeof source[field] === "string" ? source[field].trim() : "";
       if (key) keys[id] = key;
       else delete keys[id];
     }
@@ -92,7 +117,7 @@ function splitStationKeys(list, previousKeys) {
 function stationsWithKeys(list, keys) {
   return (Array.isArray(list) ? list : []).map(station => {
     const clean = station && typeof station === "object" && !Array.isArray(station) ? { ...station } : {};
-    if (typeof clean.id === "string") clean.apikey = keys[clean.id] || "";
+    if (typeof clean.id === "string" && clean.id) clean.apikey = keys[clean.id] || "";
     return clean;
   });
 }
@@ -106,12 +131,18 @@ function writeJsonAtomic(file, value) {
   try {
     fs.writeFileSync(temp, text, "utf8");
     fs.renameSync(temp, file);
+    return;
   } catch {
-    try {
-      fs.rmSync(temp, { force: true });
-    } catch { /* 临时文件残留不影响结果 */ }
-    fs.writeFileSync(file, text, "utf8");
+    /* 落到下面的覆写兜底 */
   }
+  // 覆写是原地截断，写到一半失败就没有第二份数据了：先留一份 .bak 再动手。
+  try {
+    if (fs.existsSync(file)) fs.copyFileSync(file, `${file}.bak`);
+  } catch { /* 备份失败仍然继续写，否则配置根本无法保存 */ }
+  try {
+    fs.rmSync(temp, { force: true });
+  } catch { /* 临时文件残留不影响结果 */ }
+  fs.writeFileSync(file, text, "utf8");
 }
 
 function loadState() {

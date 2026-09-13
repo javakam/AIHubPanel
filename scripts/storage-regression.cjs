@@ -5,6 +5,8 @@ const path = require("node:path");
 
 const ROOT = path.resolve(__dirname, "..");
 const TEMP_USER_DATA = path.join(os.tmpdir(), `aihubpanel-storage-${process.pid}`);
+// 存储回归全程是同步 fs 调用加窗口 await，任何一步卡住都会让 npm test 无声挂死。
+const WATCHDOG_MS = Number(process.env.AIHUB_STORAGE_WATCHDOG_MS) || 120000;
 
 app.setPath("userData", TEMP_USER_DATA);
 app.commandLine.appendSwitch("disable-gpu");
@@ -74,6 +76,10 @@ function storagePayload() {
 }
 
 async function main() {
+  const watchdog = setTimeout(() => {
+    console.error(`storage regression watchdog fired after ${WATCHDOG_MS}ms`);
+    app.exit(1);
+  }, WATCHDOG_MS);
   const runDir = fs.mkdtempSync(path.join(os.tmpdir(), `aihubpanel-storage-run-${process.pid}-`));
   const configDir = path.join(runDir, "config");
   fs.mkdirSync(configDir, { recursive: true });
@@ -161,8 +167,40 @@ async function main() {
     assert(!Object.prototype.hasOwnProperty.call(afterKeyRemoval.keys || {}, payload.stations[0].id), "clearing a station API Key must remove it from apikey.json");
     const roundTripStations = JSON.parse(await win.webContents.executeJavaScript("window.aihubStore.getItem('aihub.stations.v2')", true));
     assert(roundTripStations[0].apikey === "", "cleared API Key must stay cleared after reload");
+
+    // A station whose id is not a usable string cannot have its Key filed under apikey.json.
+    // The read path must keep the field on the station instead of dropping it: dropping made
+    // the Key vanish from both files, and the next save persisted that loss.
+    const orphanConfig = { stations: [{ name: "no-id station", baseurl: "https://orphan.example.com/v1", apikey: "sk-orphan-fake-0001" }] };
+    fs.writeFileSync(path.join(configDir, "config.json"), `${JSON.stringify(orphanConfig, null, 2)}\n`, "utf8");
+    const orphanRead = JSON.parse(await win.webContents.executeJavaScript("window.aihubStore.getItem('aihub.stations.v2')", true));
+    assert(orphanRead.length === 1 && orphanRead[0].apikey === "sk-orphan-fake-0001", "a station without a string id must keep its API Key", orphanRead);
+    const orphanSaved = JSON.parse(fs.readFileSync(path.join(configDir, "config.json"), "utf8"));
+    assert(orphanSaved.stations[0].apikey === "sk-orphan-fake-0001", "migration must not strip the API Key of a station that has no id", orphanSaved.stations[0]);
+
+    // The read filter must not re-apply the UI's length/control-character rules: a Key that is
+    // on disk has to come back out, otherwise the next save erases it.
+    const longKey = `sk-${"a".repeat(3000)}`;
+    const longKeyStations = JSON.stringify([{ id: "storage-station-longkey", name: "long key station", baseurl: "https://longkey.example.com/v1", apikey: longKey }]);
+    await win.webContents.executeJavaScript(`window.aihubStore.setItem("aihub.stations.v2", ${JSON.stringify(longKeyStations)})`, true);
+    const longKeySaved = JSON.parse(fs.readFileSync(path.join(configDir, "apikey.json"), "utf8"));
+    assert(longKeySaved.keys["storage-station-longkey"] === longKey, "a long API Key must survive the write path", { length: longKey.length });
+    const longKeyRead = await win.webContents.executeJavaScript(`(() => { const list = JSON.parse(window.aihubStore.getItem("aihub.stations.v2") || "[]"); return list[0] && list[0].apikey; })()`, true);
+    assert(longKeyRead === longKey, "a long API Key must survive the read path", { length: longKeyRead ? longKeyRead.length : 0 });
+
+    // A corrupted config.json must be recovered from the .bak left by the overwrite fallback.
+    // Treating it as "no stations at all" let the user's next save wipe the file for good.
+    const backupConfig = { stations: [{ id: "bak-station", name: "from backup", baseurl: "https://backup.example.com/v1" }] };
+    fs.writeFileSync(path.join(configDir, "config.json.bak"), `${JSON.stringify(backupConfig, null, 2)}\n`, "utf8");
+    fs.writeFileSync(path.join(configDir, "config.json"), `{ "stations": [ truncated`, "utf8");
+    const recovered = JSON.parse(await win.webContents.executeJavaScript("window.aihubStore.getItem('aihub.stations.v2')", true));
+    assert(recovered.length === 1 && recovered[0].name === "from backup", "a corrupted config.json must be recovered from its backup", recovered);
+    const healed = JSON.parse(fs.readFileSync(path.join(configDir, "config.json"), "utf8"));
+    assert(healed.stations[0].name === "from backup", "recovering from the backup must rewrite config.json", healed.stations[0]);
+
     console.log(`storage passed: ${payload.stations.length} stations, ${payload.stations.reduce((total, station) => total + station.models.length, 0)} models, ${Buffer.byteLength(payloadText, "utf8")} config bytes, 3 writes ${timings.singleWritesMs.toFixed(1)}ms, batch ${timings.batchWriteMs.toFixed(1)}ms`);
   } finally {
+    clearTimeout(watchdog);
     if (win && !win.isDestroyed()) win.destroy();
     app.quit();
     try {
