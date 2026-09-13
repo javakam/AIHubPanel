@@ -1,9 +1,12 @@
 # AIHubPanel 当前状态
 
 ## 正在做什么
-1.1.1 已发布：本轮审计修复与 `apikey.json` 拆分、Electron 运行目录搬移一并进包，便携 exe 打包完成并已用打包态启动回归验证（见 `v1.1.1` tag）。当前在做第三方站点 `api.b.ai` 的测试表现分析，代码未改动。
+1.2.0 已打包完成，等用户确认下一步。本轮全量审计的修复（前端排序回滚与设置空值、存储桥丢 Key、主进程导航拦截、转发同源校验、四套回归门禁）已全部提交，`electron/release/AIHubPanel-1.2.0.exe` 已生成并用打包态启动回归验证通过，用户真实 `config.json`/`apikey.json` 已在打包后还原。本次只要求打包，未打 tag、未推远端。
 
 ## 最近完成（近三日）
+- **2026-09-13**：全量审计并发布 1.2.0。逐条读源码核实三份审计报告后，用 8 个提交修掉全部已确认缺陷，其中 4 个会造成数据丢失或显示错乱：拖拽排序保存失败回滚时整体重建站点对象却没让在途请求失效（模型卡和连通状态会永久停在「测试中/检测中」）；设置面板清空数字输入框被 `clampInt` 夹成最小值（并发静默变 1、超时静默变 3 秒，用户以为留空就是用默认值）；存储桥读取时按长度和控制字符重筛 Key、且没有字符串 id 的站点在迁移时被摘掉 Key（等于静默删 Key）；`config.json` 被截断时界面按「零站点」显示，用户随手保存一次就把磁盘数据彻底覆盖。其余修复：原地覆写前先留 `.bak`、主进程补 `will-navigate`/`will-redirect` 同源拦截、转发同源校验改按 URL 规范化（`AI_HUB_PORT=80` 时整站转发会被自己的校验拒掉）、发布目录清理加真实路径校验并改为先验产物再删、回归门禁里 1 条永假的布局断言和 `asMiB` 的单位错误。
+- **2026-09-13**：打包并验证 1.2.0 产物。`electron/release/AIHubPanel-1.2.0.exe`（101221724 字节，sha256 `8ce58e03…9348`），目录内只保留这一个文件。打包态启动回归以真实 exe 通过：中位数总耗时 5326ms（browserWindowCreate 37ms、serverStartup 37ms、pageToReady 326ms、domToReady 19ms），并校验 `config.json`/`apikey.json` 分文件与 `.aihubpanel-data` 都落在 exe 同级。打包前把用户真实 `config.json`/`apikey.json` 备份到 `E:\goodwork\ZCodeData\aihubpanel-release-data-backup\`，打包后还原并逐字节核对——`npm run dist` 会先清空 `electron/release/`，不备份就会连真实数据一起删掉。
+- **2026-09-13**：本轮全套回归实测通过（基础检查、布局、性能、存储、启动退出码均为 0）。性能加载 375.3ms、搜索 73.5ms、420 模型详情 116.3ms、网格切换 94.1ms、8 轮重复视图切换 2964.6ms、DOM 7095、renderer 工作集增量 0.8MiB；存储回归 60 站 2190 模型、306808 字节配置。
 - **2026-09-13**：实测第三方站点 `api.b.ai` 在面板里的测试表现（Key 有效）。连通性、模型列表、模型测试都能正常跑通；47 个模型里只有 `mimo-v2.5` 和 `qwen3.8-flash` 可用（深档 7 项探针全过），其余 30 个被 403「Deposit required to unlock premium models」拦下、12 个报 400「credit insufficient balance: balance=0」、1 个 429 限流，判定均不可用且原因会原样显示给用户。余额查询 5 个候选全部失败（网关只放行推理路径）。同时纠正了一个验证方法上的错误结论：该网关实际支持 CORS（带 `Origin` 才回 `ACAO`），已写入 reference.md 的「网关诊断坑」。
 - **2026-09-13**：发布 1.1.1。核对发现 `v1.1.0` 的代码和 exe 都不含 `apikey.json` 拆分（tag 里的 preload.js 没有该文件），而文档已按拆分描述，所以本轮把拆分与 Electron 运行目录搬移一并进包；`package.json`、`package-lock.json` 两处版本与回归里钉死的版本断言同步升到 1.1.1。
 - **2026-09-13**：打包并验证产物。`electron/release/AIHubPanel-1.1.1.exe`（101222711 字节，sha256 `28ddadd6…8cbc6`），目录内只保留这一个文件。用启动回归以打包态跑真实 exe 通过：中位数总耗时 5635ms（browserWindowCreate 42ms、serverStartup 41ms、pageToReady 360ms、domToReady 23ms），并校验 `config.json`、`apikey.json`、`.aihubpanel-data` 都落在用户实际双击的 exe 同级目录，配置与 Key 分文件、启动阶段顺序均无异常。发版前全套回归（基础/布局/性能/存储/启动）退出码均为 0。
@@ -42,9 +45,12 @@
 - [x] 按 1.1.0 重新发布：清理旧发布提交和 `v1.0.1` tag，生成单文件 portable exe，创建并推送 `v1.1.0` tag。
 - [x] 复核并单独提交在途的 `apikey.json` 拆分改动（`electron/main.js`、`electron/preload.js`、`README.md`、`prompt.md`、`scripts/storage-regression.cjs`、`scripts/startup-regression.cjs` 的其余部分、`docs/agent/*`）。该改动当前通过全套回归，但不由本轮审计代为提交。→ 已复核并随 1.1.1 发布进包。
 - [ ] 复核性能回归 `repeat-view-cycles` 的 4500ms 预算（scripts/perf-regression.cjs:27）。本轮实测 4293.6ms，余量不足 5%；并发跑其它 Electron 套件时曾出现 4595.5ms 的超限。要么把预算调到与实测量级相符，要么让该套件独占运行。
+- [ ] 决定 1.2.0 是否发版：打 `v1.2.0` tag 并推远端。本次请求只要求打包，未打 tag、未推。
+- [ ] 三条本轮刻意未改、留给用户拍板的项：`configureRuntimePaths()` 目录创建失败返回 `null` 时不降级也不弹窗（electron/main.js:70）；`TEMP`/`TMP`/`TMPDIR` 的赋值顺序；`buildUrl` 里用 `_` 前缀区分请求参数的约定。都已逐条核实，改动收益小于风险，故记录不改。
+- [ ] 基础回归的语法检查只覆盖仓库内的 JS/MJS/CJS，不含 `public/index.html` 的内联部分；如需覆盖要另加 HTML 校验。
 
 ## 已知问题（长期）
-- portable 单文件 exe 启动会包含自解压耗时；1.1.0 实测三轮总耗时约 6.6/8.0/8.2 秒，中位数约 8.0 秒，应用自身页面到首帧约 0.52 秒
+- portable 单文件 exe 启动会包含自解压耗时；1.2.0 打包态实测总耗时中位数 5326ms（同法 1.1.1 为 5635ms、1.1.0 约 8.0 秒，差异主要来自机器负载），应用自身页面到首帧约 0.33 秒
 - 某些站点模型列表为空是站点分组没绑渠道，非面板问题
 - `config.json` 和 `apikey.json` 已 gitignore，前者不含 API Key，后者单独保存 API Key，两个文件都绝不提交
 - 桌面版和浏览器版数据互不同步，靠导出/导入迁移
