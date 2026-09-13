@@ -16,6 +16,39 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// 等待一次导航完成。必须在触发 reload 之前先挂上监听：location.reload() 由页面内脚本发起，
+// 等 executeJavaScript 返回再注册 did-finish-load 时，加载可能已经结束，监听器永远等不到事件。
+// 超时是必需的——这个脚本之前没有任何超时，一旦错过事件，npm test 会无声地挂死。
+function waitForLoad(win, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    const onLoad = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      win.webContents.removeListener("did-finish-load", onLoad);
+      reject(new Error(`page did not finish loading within ${timeoutMs}ms`));
+    }, timeoutMs);
+    win.webContents.once("did-finish-load", onLoad);
+  });
+}
+
+// 整轮回归的兜底时限：任何一步卡住都要变成明确失败，而不是让 npm test 无限等待。
+const WATCHDOG_MS = 120000;
+
+// setContentSize 是异步生效的，隐藏窗口里甚至可能整帧都不落地。以前只等一小会儿就测量，
+// 窗口仍是宽屏时窄屏断言会照着宽屏布局全部通过——门禁等于没有。这里等视口真的变到目标宽度。
+async function resizeTo(win, width, height, timeoutMs = 5000) {
+  win.setContentSize(width, height);
+  const deadline = Date.now() + timeoutMs;
+  let view = { width: 0, height: 0 };
+  do {
+    await delay(60);
+    view = await win.webContents.executeJavaScript(`({ width: innerWidth, height: innerHeight })`, true);
+  } while (Date.now() < deadline && Math.abs(view.width - width) > 8);
+  assert(Math.abs(view.width - width) <= 8, `window did not resize to ${width}px wide (viewport stayed ${view.width}px)`, view);
+}
+
 function assert(condition, message, details) {
   if (condition) return;
   const suffix = details ? `\n${JSON.stringify(details, null, 2)}` : "";
@@ -203,19 +236,19 @@ async function loadSeededPage(win, baseUrl) {
     localStorage.setItem("aihub.stations.v2", ${JSON.stringify(JSON.stringify([station]))});
     localStorage.setItem("aihub.settings.v2", ${JSON.stringify(JSON.stringify({ view: "list", theme: "light", proxy: "", concurrency: 20, timeout: 15, testDepth: "basic", longContextKB: 4 }))});
     localStorage.setItem("aihub.ui.v1", ${JSON.stringify(JSON.stringify({ selectedStationId: station.id, selectedModelsByStation: {} }))});
-    location.reload();
   `, true);
-  await new Promise(resolve => win.webContents.once("did-finish-load", resolve));
+  const reloaded = waitForLoad(win);
+  await win.webContents.executeJavaScript(`location.reload();`, true);
+  await reloaded;
   await delay(120);
 }
 
 async function loadEmptyPage(win, baseUrl) {
   await win.loadURL(baseUrl);
-  await win.webContents.executeJavaScript(`
-    localStorage.clear();
-    location.reload();
-  `, true);
-  await new Promise(resolve => win.webContents.once("did-finish-load", resolve));
+  await win.webContents.executeJavaScript(`localStorage.clear();`, true);
+  const reloaded = waitForLoad(win);
+  await win.webContents.executeJavaScript(`location.reload();`, true);
+  await reloaded;
   await delay(120);
   const empty = await win.webContents.executeJavaScript(`({
     rows: document.querySelectorAll(".row-item").length,
@@ -226,6 +259,10 @@ async function loadEmptyPage(win, baseUrl) {
 }
 
 async function main() {
+  const watchdog = setTimeout(() => {
+    console.error(`layout regression watchdog fired after ${WATCHDOG_MS}ms`);
+    app.exit(1);
+  }, WATCHDOG_MS);
   const port = await getFreePort();
   const baseUrl = `http://127.0.0.1:${port}`;
   const server = startPanelServer(port);
@@ -247,22 +284,22 @@ async function main() {
     await loadEmptyPage(win, baseUrl);
     await loadSeededPage(win, baseUrl);
 
-    win.setContentSize(1280, 900);
-    await delay(120);
+    await resizeTo(win, 1280, 900);
     const desktop = await collect(win, "desktop-list");
     assert(desktop.badge && desktop.badge.rect.width >= 70 && desktop.badge.rect.height <= 36, "desktop badge must stay one line", desktop.badge);
     assert(!desktop.balance.exceedsMetric, "desktop balance must not overflow its metric cell", desktop.balance);
     assert(desktop.page.scrollWidth <= desktop.page.clientWidth + 2, "desktop page must not have horizontal overflow", desktop.page);
 
-    win.setContentSize(320, 720);
-    await delay(160);
+    await resizeTo(win, 320, 720);
     const mobileList = await collect(win, "mobile-list");
+    assert(mobileList.page.innerWidth <= 400, "mobile list probe must run at the narrow viewport", mobileList.page);
     assert(!mobileList.balance.exceedsMetric, "mobile balance must not overflow its metric cell", mobileList.balance);
     assert(mobileList.page.scrollWidth <= mobileList.page.clientWidth + 2, "mobile list must not have horizontal overflow", mobileList.page);
 
     await win.webContents.executeJavaScript(`document.querySelector(".station-open").click()`, true);
     await delay(160);
     const mobileFocus = await collect(win, "mobile-focus");
+    assert(mobileFocus.page.innerWidth <= 400, "mobile focus probe must run at the narrow viewport", mobileFocus.page);
     assert(mobileFocus.badge && mobileFocus.badge.rect.width >= 70 && mobileFocus.badge.rect.height <= 36, "mobile focus badge must stay one line", mobileFocus.badge);
     assert(mobileFocus.note.text && mobileFocus.note.text.clientHeight >= 48 && mobileFocus.note.text.whiteSpace === "normal", "long note must be readable in multiple lines", mobileFocus.note);
     assert(mobileFocus.note.field && mobileFocus.note.field.title.length > 100, "long note must keep full title text", mobileFocus.note.field);
@@ -270,6 +307,7 @@ async function main() {
 
     console.log("layout passed: long title, balance, note, and mobile overflow");
   } finally {
+    clearTimeout(watchdog);
     if (win && !win.isDestroyed()) win.destroy();
     if (server.exitCode === null) server.kill();
     app.quit();

@@ -64,8 +64,13 @@ function startupStation(index) {
   };
 }
 
+const STARTUP_STATIONS = Array.from({ length: STARTUP_STATION_COUNT }, (_, index) => startupStation(index));
+const STARTUP_KEYS_TEXT = JSON.stringify({
+  version: 1,
+  keys: Object.fromEntries(STARTUP_STATIONS.map(station => [station.id, station.apikey]))
+});
 const STARTUP_CONFIG_TEXT = JSON.stringify({
-  stations: Array.from({ length: STARTUP_STATION_COUNT }, (_, index) => startupStation(index)),
+  stations: STARTUP_STATIONS.map(({ apikey, ...station }) => station),
   settings: {
     view: "list",
     theme: "light",
@@ -130,6 +135,8 @@ function measureTrace(trace, launchAt) {
     readyToShow: elapsed("ready-to-show"),
     windowShown: elapsed("window-shown"),
     configDir: stages.get("config-dir")?.label || null,
+    runtimeDir: stages.get("runtime-dir")?.label || null,
+    tempDir: stages.get("temp-dir")?.label || null,
     eventOrderAnomalies: []
   };
   if (result.mainStart != null) result.processBootstrap = result.mainStart;
@@ -192,7 +199,6 @@ function runOne(index) {
   return new Promise((resolve, reject) => {
     const runDir = fs.mkdtempSync(path.join(os.tmpdir(), `aihubpanel-startup-${process.pid}-${index}-`));
     const traceFile = path.join(runDir, "boot.log");
-    const userDataDir = path.join(runDir, "user-data");
     const dataDir = STARTUP_IS_PACKAGED ? path.join(runDir, "app") : path.join(runDir, "config");
     fs.mkdirSync(dataDir, { recursive: true });
     let executable = STARTUP_EXECUTABLE;
@@ -206,12 +212,11 @@ function runOne(index) {
       }
     }
     fs.writeFileSync(path.join(dataDir, "config.json"), `${STARTUP_CONFIG_TEXT}\n`, "utf8");
+    fs.writeFileSync(path.join(dataDir, "apikey.json"), `${STARTUP_KEYS_TEXT}\n`, "utf8");
     const launchAt = Date.now();
     const childEnv = { ...process.env };
     delete childEnv.ELECTRON_RUN_AS_NODE;
-    const childArgs = STARTUP_IS_PACKAGED
-      ? [`--user-data-dir=${userDataDir}`]
-      : [ROOT, `--user-data-dir=${userDataDir}`];
+    const childArgs = STARTUP_IS_PACKAGED ? [] : [ROOT];
     const launchEnv = {
       ...childEnv,
       AIHUB_BOOT_TRACE: traceFile,
@@ -249,11 +254,35 @@ function runOne(index) {
         try {
           assert(trace.some(entry => entry.stage === "window-shown"), `startup run ${index} did not reach window-shown`, { trace, output });
           const result = { index, ...measureTrace(trace, launchAt), trace };
+          // 阶段顺序反了说明启动流程的真实次序变了，耗时即使达标也不该放过。
+          assert(result.eventOrderAnomalies.length === 0, `startup run ${index} recorded out-of-order boot stages`, { anomalies: result.eventOrderAnomalies, trace });
           assert(result.configDir, `startup run ${index} did not report config directory`, { trace, output });
           assert(
             path.resolve(result.configDir).toLowerCase() === path.resolve(dataDir).toLowerCase(),
             `startup run ${index} did not use executable-side data directory`,
             { expected: dataDir, actual: result.configDir, trace }
+          );
+          const expectedRuntimeDir = path.join(dataDir, ".aihubpanel-data");
+          assert(
+            result.runtimeDir && path.resolve(result.runtimeDir).toLowerCase() === path.resolve(expectedRuntimeDir).toLowerCase(),
+            `startup run ${index} did not use executable-side runtime directory`,
+            { expected: expectedRuntimeDir, actual: result.runtimeDir, trace }
+          );
+          const expectedTempDir = path.join(expectedRuntimeDir, "temp");
+          assert(
+            result.tempDir && path.resolve(result.tempDir).toLowerCase() === path.resolve(expectedTempDir).toLowerCase(),
+            `startup run ${index} did not use executable-side temp directory`,
+            { expected: expectedTempDir, actual: result.tempDir, trace }
+          );
+          const storedConfig = JSON.parse(fs.readFileSync(path.join(dataDir, "config.json"), "utf8"));
+          const storedKeys = JSON.parse(fs.readFileSync(path.join(dataDir, "apikey.json"), "utf8"));
+          assert(
+            Array.isArray(storedConfig.stations) &&
+            storedConfig.stations.every(station => !Object.prototype.hasOwnProperty.call(station, "apikey") && !Object.prototype.hasOwnProperty.call(station, "apiKey")) &&
+            storedKeys.version === 1 &&
+            Object.keys(storedKeys.keys || {}).length === STARTUP_STATION_COUNT,
+            `startup run ${index} did not keep split configuration files`,
+            { configHasStations: Array.isArray(storedConfig.stations), keyCount: Object.keys(storedKeys.keys || {}).length }
           );
           resolve(result);
         } catch (assertionError) {

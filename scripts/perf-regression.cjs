@@ -384,6 +384,12 @@ function assertTimings(results) {
     if (limit != null) assert(result.ms <= limit, `${result.label} exceeded ${limit}ms`, result);
     if (result.domNodes != null) assert(result.domNodes <= MAX_DOM_NODES, `${result.label} DOM node count is too high`, result);
     if (result.overflowX != null) assert(result.overflowX <= 2, `${result.label} has horizontal overflow`, result);
+    // 只比耗时是不够的：一次「快了」的重绘完全可能是少渲染了内容（空列表、空详情）。
+    // 这几个步骤还要核对渲染结果，慢但正确和快但残缺必须能分辨出来。
+    if (result.label === "search-filter") assert(result.rows === 1 && result.models === 0, "filtering must keep exactly the matching row and drop the filtered-out detail pane", result);
+    if (result.label === "search-clear") assert(result.rows === STATION_COUNT && result.models === HEAVY_MODEL_COUNT, "clearing the search must restore every station row and the selected station's models", result);
+    if (result.label === "select-normal-detail") assert(result.selectedId === "station-005" && result.models === NORMAL_MODEL_COUNT, "selecting a normal station must render that station's full model list", result);
+    if (result.label === "select-heavy-detail") assert(result.selectedId === "station-000" && result.models === HEAVY_MODEL_COUNT, "selecting the heavy station must render its full model list", result);
     if (result.label === "switch-grid") assert(result.rows === 0 && result.models === 0, "grid view must release list/detail markup", result);
     if (result.label === "switch-list") assert(result.cards === 0, "list view must release grid markup", result);
     if (result.label === "mobile-focus-heavy") assert(result.rows === 0 && result.cards === 0, "focus view must release list/grid markup", result);
@@ -393,7 +399,9 @@ function assertTimings(results) {
 function assertMemory(before, after) {
   const beforeMiB = rendererFootprint(before);
   const afterMiB = rendererFootprint(after);
-  if (beforeMiB == null || afterMiB == null) return null;
+  // 以前取不到内存就 return null 静默跳过，等于这道门禁可以无声失效。
+  // 拿不到可比较的数字时宁可失败：那说明采集方式坏了，而不是「内存没问题」。
+  assert(beforeMiB != null && afterMiB != null, "renderer memory could not be measured, so the leak gate cannot be trusted", { before, after });
   const deltaMiB = Math.round((afterMiB - beforeMiB) * 10) / 10;
   assert(deltaMiB <= MAX_REPEAT_RENDERER_DELTA_MIB, `renderer memory grew more than ${MAX_REPEAT_RENDERER_DELTA_MIB} MiB after repeated view changes`, { before, after, deltaMiB });
   return deltaMiB;
