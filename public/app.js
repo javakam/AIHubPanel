@@ -30,7 +30,6 @@ let localProxyLastCheckedAt = 0;
 // 但浏览器无法读取带 Authorization 的响应（典型是未配置 CORS 的 OpenAI 网关）。
 // 它与 online 分开，避免把“网络可达”误报成“API Key 已验证”。
 const CONNECTIVITY_STATES = new Set(["unknown","testing","online","reachable","offline"]);
-const MODEL_STATES = new Set(["idle","testing","ok","fail"]);
 // 模型响应达到此阈值仍视为成功，但在卡片上明确标为“延迟较高”。
 const MODEL_SLOW_LATENCY_MS = 800;
 // 日志只保留有限的摘要，既能排查请求又不会随批量测试无限增长。
