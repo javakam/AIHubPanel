@@ -157,6 +157,9 @@ function normalizeApiKey(value){
   return key.length<=2048 && !/[\u0000-\u001f\u007f]/.test(key) ? key : "";
 }
 function clampInt(value, min, max, fallback){
+  // 设置面板里清空数字输入框得到的是空串，Number("") 是 0，会被夹到最小值：
+  // 并发数静默变 1、超时静默变 3 秒，用户以为留空就是「用默认值」。留空即默认。
+  if(value === null || value === undefined || value === "") return fallback;
   const n = Number(value);
   return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.trunc(n))) : fallback;
 }
@@ -3574,7 +3577,9 @@ function reorder(fromId, toId, after){
   stations.forEach((station,index)=>{ station.order=index; });
   if(!save()){
     // 拖拽排序属于结构性改动，写入失败时立即还原内存顺序，避免刷新前后看到两套结果。
-    stations=JSON.parse(previousSnapshot);
+    // 快照恢复会重建全部站点对象，必须走统一入口：直接把 JSON 塞回 stations 会让
+    // 在途请求仍绑在旧对象上，模型卡的「测试中」标记也停在原地。
+    restoreStationsFromSnapshot(previousSnapshot);
     byOrder();
     toast("排序保存失败：本地存储不可用，本次调整已撤销","err");
     return false;
