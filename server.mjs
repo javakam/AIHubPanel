@@ -155,7 +155,7 @@ function isPublicIPv4(address) {
     inRange(0x00000000, 8) || inRange(0x0a000000, 8) || inRange(0x64400000, 10) ||
     inRange(0x7f000000, 8) || inRange(0xa9fe0000, 16) || inRange(0xac100000, 12) ||
     inRange(0xc0000000, 24) || inRange(0xc0a80000, 16) || inRange(0xc6120000, 15) ||
-    inRange(0xcb007100, 24) || inRange(0xe0000000, 4)
+    inRange(0xcb007100, 24) || inRange(0xe0000000, 4) || inRange(0xf0000000, 4)
   );
 }
 
