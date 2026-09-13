@@ -6,6 +6,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const RELEASE_DIR = path.join(ROOT, "electron", "release");
 const PACKAGE_FILE = path.join(ROOT, "package.json");
 const KEEP_PORTABLE = process.argv.includes("--keep-portable");
+// 杀软扫描 100MB 的 exe、资源管理器打开过目录，都会让删除短时间内报 EPERM/EBUSY。
+// 退避重试能跨过这类瞬时占用；真正的占用（有进程把该目录当工作目录）仍会失败退出。
+const RM_OPTIONS = { recursive: true, force: true, maxRetries: 5, retryDelay: 120 };
 
 function assertReleasePath() {
   const expectedParent = path.join(ROOT, "electron");
@@ -29,7 +32,7 @@ function assertReleasePath() {
 
 function removeReleaseDirectory() {
   assertReleasePath();
-  fs.rmSync(RELEASE_DIR, { recursive: true, force: true });
+  fs.rmSync(RELEASE_DIR, RM_OPTIONS);
   console.log(`release cleaned: ${RELEASE_DIR}`);
 }
 
@@ -51,7 +54,7 @@ function pruneReleaseDirectory() {
     if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) {
       throw new Error(`refusing to delete ${target}: it resolves outside the release directory`);
     }
-    fs.rmSync(target, { recursive: true, force: true });
+    fs.rmSync(target, RM_OPTIONS);
   }
   console.log(`release kept: ${artifactName}`);
 }
