@@ -18,6 +18,9 @@ const CHECK_FILES = [
   "scripts/startup-regression.cjs"
 ];
 
+// 子进程卡住（git 等锁、node --check 被杀软拦住）不能让 npm test 一直挂着。
+const RUN_TIMEOUT_MS = Number(process.env.AIHUB_RUN_TIMEOUT_MS) || 120000;
+
 function run(command, args, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -29,10 +32,18 @@ function run(command, args, options = {}) {
     });
     let stdout = "";
     let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`${command} ${args.join(" ")} timed out after ${RUN_TIMEOUT_MS}ms`));
+    }, RUN_TIMEOUT_MS);
+    const settle = callback => value => {
+      clearTimeout(timer);
+      callback(value);
+    };
     child.stdout.on("data", chunk => { stdout += chunk; });
     child.stderr.on("data", chunk => { stderr += chunk; });
-    child.on("error", reject);
-    child.on("close", code => {
+    child.on("error", settle(reject));
+    child.on("close", settle(code => {
       if (code === 0) resolve({ stdout, stderr });
       else {
         const error = new Error(`${command} ${args.join(" ")} failed with code ${code}`);
@@ -40,7 +51,7 @@ function run(command, args, options = {}) {
         error.stderr = stderr;
         reject(error);
       }
-    });
+    }));
   });
 }
 
@@ -133,7 +144,7 @@ async function runSyntaxChecks() {
 
 function runReleaseAndDefaultChecks() {
   const packageInfo = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
-  if (packageInfo.version !== "1.1.1") throw new Error(`package version must be 1.1.1, got ${packageInfo.version}`);
+  if (packageInfo.version !== "1.2.0") throw new Error(`package version must be 1.2.0, got ${packageInfo.version}`);
   const targets = packageInfo.build?.win?.target;
   if (!Array.isArray(targets) || targets.length !== 1 || targets[0] !== "portable") {
     throw new Error(`Windows build must have only the portable target, got ${JSON.stringify(targets)}`);
