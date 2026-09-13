@@ -59,6 +59,14 @@ REM Set AI_HUB_OPEN_BROWSER=1 before running this file for an explicit opt-in.
 if /i "%AI_HUB_OPEN_BROWSER%"=="1" start "" /b powershell.exe -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 1; Start-Process 'http://127.0.0.1:%AI_HUB_PORT%/'"
 echo Open this address manually: http://127.0.0.1:%AI_HUB_PORT%/
 node server.mjs
+REM Without this check a failed start (port taken between the probe and the
+REM bind, bad config) just prints the banner and looks like a normal exit.
+if errorlevel 1 (
+  echo.
+  echo Server exited with an error. Read the message above before closing.
+  pause
+  exit /b 1
+)
 
 echo.
 echo The server has stopped.
