@@ -1,6 +1,6 @@
 {
   "name": "aihubpanel-desktop",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
   "description": "AIHubPanel 桌面版：Electron 壳 + 复用现有 server.mjs",
   "author": "AIHubPanel",

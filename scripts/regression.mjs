@@ -133,7 +133,7 @@ async function runSyntaxChecks() {
 
 function runReleaseAndDefaultChecks() {
   const packageInfo = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
-  if (packageInfo.version !== "1.1.0") throw new Error(`package version must be 1.1.0, got ${packageInfo.version}`);
+  if (packageInfo.version !== "1.1.1") throw new Error(`package version must be 1.1.1, got ${packageInfo.version}`);
   const targets = packageInfo.build?.win?.target;
   if (!Array.isArray(targets) || targets.length !== 1 || targets[0] !== "portable") {
     throw new Error(`Windows build must have only the portable target, got ${JSON.stringify(targets)}`);

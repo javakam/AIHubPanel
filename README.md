@@ -89,6 +89,6 @@ npm run dist
 
 产物在 `electron/release/`：
 
-- `AIHubPanel-1.1.0.exe`：单文件非安装版，直接双击运行。
+- `AIHubPanel-1.1.1.exe`：单文件非安装版，直接双击运行。
 
 打包脚本会先清空旧产物，构建完成后只保留这一个 exe。程序数据保存在运行时 exe 同级目录：普通配置和测试记录在 `config.json`，API Key 单独在 `apikey.json`。Electron 的缓存、日志和临时运行数据也尽量写入同级隐藏目录 `.aihubpanel-data`。便携版启动时虽然会在系统临时目录自解压，但业务数据仍写回用户实际双击的 exe 所在目录。两个 JSON 文件都请妥善保存，其中 `apikey.json` 尤其重要。
