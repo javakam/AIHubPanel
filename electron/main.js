@@ -25,6 +25,26 @@ function trace(stage, label) {
 trace("main-start", "main.js 开始执行");
 
 let mainWindow = null;
+// 本地服务拿到端口后才知道面板的 origin；导航白名单按它判定。
+let panelOrigin = "";
+
+// 外链一律交给系统浏览器，不在面板窗口里打开陌生网页。
+function openExternal(url) {
+  try {
+    if (/^https?:$/.test(new URL(url).protocol)) void shell.openExternal(url);
+  } catch { /* 非法 URL 直接忽略 */ }
+}
+
+// 只认「origin 完全等于本地面板」的地址。不能用前缀匹配：http://127.0.0.1:1234@evil.com
+// 这种地址的 origin 是 evil.com，前缀却对得上。
+function isPanelUrl(value) {
+  try {
+    const parsed = new URL(value);
+    return /^https?:$/.test(parsed.protocol) && parsed.origin === panelOrigin;
+  } catch {
+    return false;
+  }
+}
 
 // 打包后 server.mjs 和 public/ 会被 asarUnpack 解到 app.asar.unpacked。
 // server.mjs 用自身位置推算 public/ 目录，静态文件也得是真实文件，所以路径统一换到 unpacked 下。
@@ -134,11 +154,20 @@ function createWindow() {
   mainWindow.on("closed", () => { mainWindow = null; });
   // 站点地址等外链交给系统浏览器，不在面板窗口里打开陌生网页。
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    try {
-      if (/^https?:$/.test(new URL(url).protocol)) void shell.openExternal(url);
-    } catch { /* 非法 URL 直接忽略 */ }
+    openExternal(url);
     return { action: "deny" };
   });
+  // preload 里挂着同步读写配置和 API Key 的存储桥，additionalArguments 会跟着导航走，
+  // preload 也会在新文档里重跑：主框架一旦被换页（页面里的链接、表单提交、把 html
+  // 文件拖进窗口），等于把配置读写能力交给一个陌生页面。所以主框架只许留在本地面板上；
+  // 服务器重定向走 will-redirect，单独拦一次。
+  const blockNavigation = (event, url) => {
+    if (isPanelUrl(url)) return;
+    event.preventDefault();
+    openExternal(url);
+  };
+  mainWindow.webContents.on("will-navigate", blockNavigation);
+  mainWindow.webContents.on("will-redirect", blockNavigation);
   trace("window-created", "窗口已创建（尚未加载页面）");
 }
 
@@ -172,7 +201,8 @@ function loadPanel(port) {
     mainWindow.show();
     trace("window-shown", "首帧画好，显示窗口");
   });
-  void mainWindow.loadURL(`http://127.0.0.1:${port}`);
+  panelOrigin = `http://127.0.0.1:${port}`;
+  void mainWindow.loadURL(panelOrigin);
   trace("navigation-started", "loadURL 已发出");
 }
 
