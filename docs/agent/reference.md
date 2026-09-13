@@ -14,12 +14,13 @@
 - `npm test` 会嵌套调用 `npm run check` 等子命令，子进程内 `npm` 仍需在 PATH 上，本机因此跑不了完整 `npm test`；按 package.json 里的定义逐条串起来等价（`node scripts/regression.mjs && node node_modules/electron/cli.js scripts/layout-regression.cjs && …`）
 - 若 `npm` 完全不可用，可直接跑底层脚本，等价于对应 npm script：基础回归 `node scripts/regression.mjs`，其余四个套件 `node node_modules/electron/cli.js scripts/<名字>.cjs`
 
-## 启动耗时（实测，2026-09-11）
+## 启动耗时（实测，2026-09-11 ~ 2026-09-13）
 - 量法：设 `AIHUB_BOOT_TRACE=<路径>` 再启动，主进程逐段写「绝对时间戳 + 阶段名」（electron/main.js:22）；不设置时不写诊断日志，正常启动无额外开销
 - 合成负载：60 个站点、2190 个模型、335901 字节配置；启动回归使用隔离 Electron profile，不读取根目录 `config.json`
 - 1.1.0 单文件非安装版：启动回归会复制 exe 到临时测试目录，验证 portable 启动器实际把配置目录和运行目录指向 exe 同级目录；本轮三次总耗时约 6.6/8.0/8.2 秒，中位数约 8.0 秒
 - 1.1.1 单文件非安装版（打包态实测，`AIHUB_STARTUP_EXECUTABLE` 指向真实 exe）：中位数总耗时 5635ms，browserWindowCreate 42ms、serverStartup 41ms、pageToReady 360ms、domToReady 23ms；同时校验 `config.json`/`apikey.json` 分文件落盘与 `.aihubpanel-data` 运行目录都在 exe 同级
 - 1.2.0 单文件非安装版（打包态实测，同上量法）：中位数总耗时 5326ms，browserWindowCreate 37ms、serverStartup 37ms、pageToReady 326ms、domToReady 19ms
+- 1.2.0 清理死代码后重新打包的产物（同一版本号，sha256 `c649abaf…`）：中位数总耗时 5551ms，browserWindowCreate 41ms、serverStartup 40ms、pageToReady 371ms、domToReady 22ms。与应用自身耗时的差异同上一轮一样来自机器负载，不要当成清理带来的退化。
 - 比较 1.1.0 与 1.1.1 的便携启动耗时要先排除机器负载：同日的性能回归重复切换耗时在 3.0–4.6s 之间波动，上面几组数字只在各自当次环境下可比
 - 应用自身耗时（main.js → 窗口显示）：源码回归中位数约 0.638s；服务启动约 39-40ms，页面导航到首帧约 0.38-0.41s
 - 前端：合成负载下 responseEnd 47-67ms，DOMContentLoaded 308-330ms（首次载入还会受 Electron 冷启动影响）
@@ -40,6 +41,14 @@
 - 清理脚本报 `EPERM: Permission denied` 删不掉 `electron/release` 时，先看是不是某个 shell/资源管理器把「当前工作目录」留在了里面：Windows 不允许删除任何进程的 CWD，这种占用重试也不会好。把 CWD 换出去再删即可（本次实测换到 `E:\` 后逐个条目都删得掉）。
 - 杀软扫描 100MB 的 exe 也会造成瞬时 `EPERM/EBUSY`，这类可恢复占用由 `scripts/clean-release.mjs:11` 的 `maxRetries` 退避重试覆盖；真正的占用仍然让脚本失败退出，不静默放过。
 
+## 体积构成与瘦身实测（2026-09-13）
+- 仓库 574MB 的构成：`node_modules` 463MB（只有 devDependency，不随产物分发）、`electron/release` 107MB（产物 exe 101MB + 用户数据）、全部源码合计约 352KB（app.js 261KB、app.css 78KB、index.html 15.8KB）。所以「项目太大」永远指前两项，改源码省不出可感知的体积。
+- Electron 运行时（367MB 解包后）本身是 exe 的主体：electron.exe 233.9MB、dxcompiler.dll 24.6MB、LICENSES.chromium.html 19.5MB、resources.pak 11.9MB、icudtl.dat 10.4MB、locales 49MB。
+- 实测 `--config.compression=maximum` 单加压缩：产物 101224169 字节，与默认压缩的 101221724 字节没有区别。便携包内部主体是已压缩的 exe/dll/pak，二次压缩挤不出空间，不要再试这条。
+- 实测 afterPack 删 7 个运行时文件（dxcompiler.dll、dxil.dll、vk_swiftshader.dll、vk_swiftshader_icd.json、vulkan-1.dll、LICENSES.chromium.html、ffmpeg.dll）：产物 101221724 → 92051519 字节（87.8MiB，−9%），打包态启动回归 EXIT=0 且能到 window-shown。收益不到 10%，代价是拿掉软件渲染/无 GPU 回退与系统 ffmpeg，属未经真实机器验证的运行时改动，因此未采纳。
+- 已生效的常规瘦身只有 `electronLanguages` 只留 en-US / zh-CN（locales 49MB 里砍掉其余语言）。要继续变小只能动 Electron 运行时二进制，不建议；想「启动更快」应该走 zip 目录版而不是 portable，portable 的自解压开销（约 5 秒）在配置层调不动。
+- 临时构建验证放在仓库外（`E:\goodwork\ZCodeData\` 下的探测目录），不要往 `electron/release/` 里塞对比产物——那里是用户双击运行的真实目录。
+
 ## Windows 保留端口段
 - `netsh int ipv4 show excludedportrange protocol=tcp` 查看被系统预留的段
 - 4398/4179 经常落在本机预留段里，bind 直接 EACCES
@@ -50,16 +59,16 @@
 - `.ps1` 同样保持纯 ASCII；读 UTF-8 文件用 `Get-Content -Encoding UTF8`
 
 ## CSS 响应式坑
-- `transition` 简写不写属性名等于 `transition-property: all`，会把断点上的尺寸变化也做成动画。凡是 `@media` 断点会改变同一属性值的规则，都必须显式列出属性名（public/app.css:128-133、527、817）。
+- `transition` 简写不写属性名等于 `transition-property: all`，会把断点上的尺寸变化也做成动画。凡是 `@media` 断点会改变同一属性值的规则，都必须显式列出属性名。当前全文件已无省略属性名的 `transition`；两个参照点：`.search input` 的过渡只列颜色属性（public/app.css:132），而 640px 断点恰好要改它的 `width`/`max-width`（public/app.css:730），这正是当初踩坑的组合；`.status-refresh` 同理（public/app.css:829，尺寸在 :901 被断点改写）。
 - 后果的严重程度取决于窗口可见性：隐藏/后台窗口的动画时间轴不前进，元素会永久停在断点前的尺寸上。实测 `.search input` 卡在 250px，在 320px 视口下溢出 43px，且用行内样式也无法覆盖（行内样式被动画中的计算值挡住，只有 `!important` 能压过）。
 - 判断手法：同一个节点在别处克隆并挂到同一父级下测量。克隆体走默认尺寸、原节点却停在旧尺寸，即可确认是动画而非级联或布局问题。
 - 因此布局回归的窄屏断言不依赖 `setContentSize` 立即生效，改为轮询 `innerWidth` 达标（scripts/layout-regression.cjs:41）。
 
 ## 网关诊断坑
-- 验证网关的 CORS 支持必须带 `Origin` 请求头。实测 `api.b.ai` 只在请求带 `Origin` 时回 `Access-Control-Allow-Origin`，不带就完全没有该头；预检 `OPTIONS` 则返回 204 加 `ACAO: *`。用 curl 不带 Origin 去测会得出「网关没有 CORS、必然回退内置转发」的反向结论，而这个判断直接决定面板走直连还是转发（public/app.js:1311、1343）。
-- 内置转发是 Node 进程，不使用系统代理；`settings.proxy` 非空时还会直接禁用转发（public/app.js:1311）。所以「系统代理开着」不等于「转发兜底可用」：本机实测 `api.b.ai` 直连在 TCP 层就不通（25s 无握手，且 DNS 结果在 Facebook 网段与 74.86.12.172 之间跳），经 `127.0.0.1:7890` 正常。这类域名一旦走到转发，会一直等到 `AI_HUB_PROXY_TIMEOUT_MS`（默认 120000，server.mjs:21）才回 504；面板侧 15s 的 AbortController 先断开，用户看到的是「请求超时」。
-- `settings.proxy`（public/app.js:773 的 `buildUrl`）是 URL 前缀型转发（`?u=` 或 `{url}` 占位符），不是标准 HTTP 代理，不能把 `127.0.0.1:7890` 当系统代理填进去。
-- 只放行推理路径的网关（报错形如 `HTTP node only allows access to inference API paths`）会让余额查询的 5 个默认候选全部失败（public/app.js:88-94），其中 `/api/usage/token` 还会先返回 301。这类站点的余额在面板里取不到，属网关侧限制，调 `balancePath` 也无解。
+- 验证网关的 CORS 支持必须带 `Origin` 请求头。实测 `api.b.ai` 只在请求带 `Origin` 时回 `Access-Control-Allow-Origin`，不带就完全没有该头；预检 `OPTIONS` 则返回 204 加 `ACAO: *`。用 curl 不带 Origin 去测会得出「网关没有 CORS、必然回退内置转发」的反向结论，而这个判断直接决定面板走直连还是转发（public/app.js:1310、1342）。
+- 内置转发是 Node 进程，不使用系统代理；`settings.proxy` 非空时还会直接禁用转发（public/app.js:1310）。所以「系统代理开着」不等于「转发兜底可用」：本机实测 `api.b.ai` 直连在 TCP 层就不通（25s 无握手，且 DNS 结果在 Facebook 网段与 74.86.12.172 之间跳），经 `127.0.0.1:7890` 正常。这类域名一旦走到转发，会一直等到 `AI_HUB_PROXY_TIMEOUT_MS`（默认 120000，server.mjs:21）才回 504；面板侧 15s 的 AbortController 先断开，用户看到的是「请求超时」。
+- `settings.proxy`（public/app.js:771 的 `buildUrl`）是 URL 前缀型转发（`?u=` 或 `{url}` 占位符），不是标准 HTTP 代理，不能把 `127.0.0.1:7890` 当系统代理填进去。
+- 只放行推理路径的网关（报错形如 `HTTP node only allows access to inference API paths`）会让余额查询的 5 个默认候选全部失败（public/app.js:88-92），其中 `/api/usage/token` 还会先返回 301。这类站点的余额在面板里取不到，属网关侧限制，调 `balancePath` 也无解。
 
 ## 关键依赖
 - 网页版无第三方依赖，Node 18+
@@ -88,7 +97,7 @@
 - `scripts/storage-regression.cjs` — Electron 配置桥回归：批量写入、外部修改检测和大配置落盘
 - `scripts/startup-regression.cjs` — Electron 启动回归：合成配置、阶段耗时和打包产物启动
 - `public/index.html` — 页面骨架
-- `public/app.js` — 前端全部逻辑（4716 行原生 JS，无框架无构建）
+- `public/app.js` — 前端全部逻辑（4715 行原生 JS，无框架无构建）
 - `public/app.css` — 样式
 - `start-aihubpanel.bat` — Windows 手动启动（网页版，默认不自动打开浏览器）
 - `electron/main.js` — 桌面版主进程
@@ -106,31 +115,31 @@
 - 默认发布为单文件 portable exe；启动时会有自解压开销，配置文件仍位于用户实际 exe 同级目录
 
 ## 关键内部约束（来自历史审计）
-- `modelDisplayTier`（public/app.js:2789）是判断口径的单一来源，「复制可用模型」和排序都靠它
-- 测试中卡片保留上次快照排序键，插入比较必须用同一份 `keys`（public/app.js:2824），不能用实时 latency
+- `modelDisplayTier`（public/app.js:2788）是判断口径的单一来源，「复制可用模型」和排序都靠它
+- 测试中卡片保留上次快照排序键，插入比较必须用同一份 `keys`（public/app.js:2823），不能用实时 latency
 - `modelListEmpty` 仅在 HTTP 200 + 空数组时为真，任何错误/非空都清
 - Electron 错误路径用 `dialog.showErrorBox` + `app.exit(1)`，用户行为不变
 - API 请求链固定发起时的 `stationRevision`；自动客户端修复不得在站点编辑/删除后写回旧配置，过期响应体要取消以释放连接。
 - 删除或编辑保存失败回滚时要恢复站点、模型勾选、Key 显示和排序快照；站点请求已失效时保留新 revision，避免模型卡永久停在“测试中”。
-- API Key 掩码的首尾保留量固定（列表 8+6，详情 6+4）。长度不足 15 位时两段会重叠、把整个 Key 拼回来（11-14 位即全部字符可见），这种长度必须退回短掩码（public/app.js:517）。掩码长度不随 Key 真实长度伸缩，否则等于把「Key 有多长」也一并泄露。
-- 数值归一化统一走 `optionalNumber`（public/app.js:167）：`Number(null)` 和 `Number("")` 都是 0，会把「没测到」写成「首字 0ms」「HTTP 0」。
-- 脱敏必须先替换再截断（public/app.js:1142）。反过来会把跨越截断边界的完整 Key 切成两段，替换匹配不到，明文片段就留在日志和错误提示里。
-- 回滚时若整体重建 stations，一律走 `restoreStationsFromSnapshot`（public/app.js:1034）：请求版本绑在站点对象标识上，重建后旧对象上的版本判断全部失效，不清算会让模型卡和连通状态永久停在「测试中/检测中」。
-- 自定义请求头在写入前按编码后 3000 字节设限（public/app.js:1497），给 server.mjs 的 `x-aihub-extra-headers` 控制头上限（4096 字符）留 base64 的 4/3 膨胀余量，避免收下一份每个请求都必然被转发层拒绝的配置。
+- API Key 掩码的首尾保留量固定（列表 8+6，详情 6+4）。长度不足 15 位时两段会重叠、把整个 Key 拼回来（11-14 位即全部字符可见），这种长度必须退回短掩码（public/app.js:516）。掩码长度不随 Key 真实长度伸缩，否则等于把「Key 有多长」也一并泄露。
+- 数值归一化统一走 `optionalNumber`（public/app.js:166）：`Number(null)` 和 `Number("")` 都是 0，会把「没测到」写成「首字 0ms」「HTTP 0」。
+- 脱敏必须先替换再截断（public/app.js:1141）。反过来会把跨越截断边界的完整 Key 切成两段，替换匹配不到，明文片段就留在日志和错误提示里。
+- 回滚时若整体重建 stations，一律走 `restoreStationsFromSnapshot`（public/app.js:1033）：请求版本绑在站点对象标识上，重建后旧对象上的版本判断全部失效，不清算会让模型卡和连通状态永久停在「测试中/检测中」。
+- 自定义请求头在写入前按编码后 3000 字节设限（public/app.js:1496），给 server.mjs 的 `x-aihub-extra-headers` 控制头上限（4096 字符）留 base64 的 4/3 膨胀余量，避免收下一份每个请求都必然被转发层拒绝的配置。
 - 内置转发的公网校验在 `isPublicIPv4`（server.mjs:153）分段列出保留网段，本轮补上 240.0.0.0/4（server.mjs:161）。判断 SSRF 覆盖是否完整时逐个核对这些网段，不要凭函数名判断。
 - 同源校验只在没有 `AI_HUB_ALLOWED_ORIGIN` 时才枚举回环主机，两侧都要按 URL 规范化后再比（server.mjs:117）。手工拼 `:${port}` 在默认端口上永远比不上：`http://127.0.0.1:80` 的 origin 会被序列化成 `http://127.0.0.1`，`AI_HUB_PORT=80` 时整站转发会被自己的校验拒掉。
-- 存储桥的读取路径只做类型校验，不做长度和控制字符过滤（electron/preload.js）。前端 `normalizeApiKey`（public/app.js:154）已在写入前应用同一条规则，读取时再筛一次等于把「暂时不合法」的 Key 直接从磁盘上抹掉；判断该不该在读取侧拦脏数据，以写入侧是否已收敛为准。
+- 存储桥的读取路径只做类型校验，不做长度和控制字符过滤（electron/preload.js）。前端 `normalizeApiKey`（public/app.js:153）已在写入前应用同一条规则，读取时再筛一次等于把「暂时不合法」的 Key 直接从磁盘上抹掉；判断该不该在读取侧拦脏数据，以写入侧是否已收敛为准。
 - 迁移 Key 时站点没有可用的字符串 id 就不能把 Key 摘下来（electron/preload.js）。摘下来的 Key 既进不了 `keys` 表也没有站点可挂，等于静默销毁；这类站点保持原样，等前端补齐 id 后再迁。
 - `config.json` 被写坏（断电、被外部编辑器截断）时从 `config.json.bak` 恢复并重新落盘（electron/preload.js）；主文件不存在时不看备份——删掉 `config.json` 是明确的「重置」，不该被备份复活。
 - 走「改名失败退回原地覆写」之前先留一份 `.bak`（electron/preload.js）。覆写是原地截断，写到一半失败就没有第二份数据，而这个 `.bak` 正是上面那条恢复逻辑的唯一来源。
 - 主进程只允许主框架导航到「origin 完全等于本地面板」的地址（electron/main.js）。不能用前缀匹配：`http://127.0.0.1:1234@evil.com` 的 origin 是 evil.com，前缀却对得上，而 preload 存储桥跟着主框架文档走，放行导航等于把配置读写暴露给外部页面。
-- 设置面板的数字输入留空时按默认值处理，不按 0 处理（public/app.js:159 的 `clampInt`）。清空输入框得到空串，`Number("")` 是 0，会被夹到最小值：并发数静默变 1、超时静默变 3 秒，用户以为留空就是「用默认值」。
+- 设置面板的数字输入留空时按默认值处理，不按 0 处理（public/app.js:158 的 `clampInt`）。清空输入框得到空串，`Number("")` 是 0，会被夹到最小值：并发数静默变 1、超时静默变 3 秒，用户以为留空就是「用默认值」。
 - `configureRuntimePaths()`（electron/main.js:70，调用点在 :210）返回 `null` 表示目录创建失败。此处刻意不降级也不弹窗：同一个原因会让随后每个 `app.setPath` 一起失败，而 TEMP/TMP 赋值只影响应用自身子进程，不该因此打断启动。
 
 ## 回归门禁约定
 - 跑任何 Electron 套件前先杀掉残留进程（`taskkill //F //IM electron.exe`）：旧实例占着单实例锁会拖慢启动，多个套件并发会让耗时门禁出现假失败。
 - 布局回归：重载前必须先注册 `did-finish-load` 并带超时（scripts/layout-regression.cjs:22），否则监听器注册在 `reload()` 之后且无超时会永久挂住；窗口尺寸用 `resizeTo` 轮询 `innerWidth` 达标（:41）；整轮有 `WATCHDOG_MS` 兜底（:37）。
-- 布局回归的余额断言比的是「四格指标区的格子是否都在容器内」（scripts/layout-regression.cjs:223，断言在 :298 和 :304），不是「值盒子是否越过格子边界」。后者永远为假：`.m-val` 是 `display:block` + `overflow:hidden`，宽度恒等于父级内容盒（public/app.css:855），这种断言抓不到任何回归，写门禁时要先确认断言真的可能失败。
+- 布局回归的余额断言比的是「四格指标区的格子是否都在容器内」（scripts/layout-regression.cjs:223，断言在 :298 和 :304），不是「值盒子是否越过格子边界」。后者永远为假：`.m-val` 是 `display:block` + `overflow:hidden`，宽度恒等于父级内容盒（public/app.css:821），这种断言抓不到任何回归，写门禁时要先确认断言真的可能失败。
 - 性能回归：耗时达标之外还要断言结果内容（scripts/perf-regression.cjs:397 的 `assertTimings`），只看耗时会把「渲染很快但结果错了」放行——「快了」完全可能是少渲染了内容；内存测不到时直接判失败而不是跳过（:423）。`repeat-view-cycles` 预算 4500ms（:27）实测余量不足 5%，改动该路径时要留意。
 - 性能回归的内存单位只能按 KB→MiB 固定换算（scripts/perf-regression.cjs:326 的 `asMiB`）。曾在读数大于 1 MiB 时改按字节理解、除以 `1024*1024`，结果把一个 1.2GiB 的渲染进程读成 1.2MiB，120MiB 的泄漏门禁变成永不可能失败。
 - 视图切换类断言必须同时断「数量」（scripts/perf-regression.cjs:411-414）。只断「上一屏的 DOM 没了」的话，整屏都没渲染也照样满足那一条，而那一刻当然是最快的。
@@ -139,6 +148,7 @@
 - 诊断用的临时脚本用完即删，不要留在 `scripts/` 下（会混进 diff 和 `npm test` 的目录约定）；也别写进 `/tmp`（Git Bash 的 `/tmp` 就是 C 盘用户临时目录），放 `E:\goodwork\ZCodeData\zcode-probe\`。
 
 ## 性能 / 内存审计记录
+- **2026-09-13**：死代码清理后复测（清理只删样式与常量，不动逻辑）：布局、基础、打包态启动、性能、存储五套退出码均为 0；性能回归 renderer 工作集增量为 −3MiB，即清理后比清理前更省；打包态启动中位数 5551ms（明细见上节）。
 - **2026-09-13**：审计后全套复测（串行执行，跑前清掉残留 electron）：seeded load 464.7ms、搜索过滤 78.1ms、420 模型详情 159ms、网格切换 122.5ms、8 轮重复视图操作 4293.6ms、DOM 7095、renderer 工作集增量 0.3MiB；启动回归源码态中位数 685ms（browserWindowCreate 39ms、serverStartup 41ms、pageToReady 439ms、domToReady 26ms）。同一轮布局、存储、启动套件退出码均为 0。
 - **2026-09-13**：并发跑多个 Electron 套件时 `repeat-view-cycles` 曾实测 4595.5ms 超出 4500ms 预算，改为串行后回到 4293.6ms。该门禁对机器负载敏感，结论要以独占运行为准。
 - **2026-09-11**：合成负载为 60 个站点、2190 个模型、每站 16 条日志，存储数据约 1.6 MB；420 个模型的详情页作为最重单站场景。

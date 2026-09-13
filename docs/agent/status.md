@@ -1,9 +1,12 @@
 # AIHubPanel 当前状态
 
 ## 正在做什么
-1.2.0 已打包完成，等用户确认下一步。本轮全量审计的修复（前端排序回滚与设置空值、存储桥丢 Key、主进程导航拦截、转发同源校验、四套回归门禁）已全部提交，`electron/release/AIHubPanel-1.2.0.exe` 已生成并用打包态启动回归验证通过，用户真实 `config.json`/`apikey.json` 已在打包后还原。本次只要求打包，未打 tag、未推远端。
+本轮「全量审计 + 体积优化」已收尾。体积结论：仓库 574MB 里 463MB 是 devDependency、107MB 是发布目录（含 101MB 的 exe），源码只占 352KB，所以源码侧无可优化空间；exe 瘦身做过两次实测（单加压缩无效，删 7 个 Electron 运行时文件省 9% 但拿掉软件渲染与系统 ffmpeg），收益小于风险，未采纳。代码侧做了真正的死代码清理（39 删 4 增），并从清理后的源码重新打包（sha256 `c649abaf…de1a`，101224172 字节），五套回归在清理后的代码与打包态上全部通过。等用户拍板：是否给 exe 瘦身、是否给 1.2.0 打 tag 推远端（本次均未做）。
 
 ## 最近完成（近三日）
+- **2026-09-13**：体积审计与瘦身实测（本轮）。先拆体积：仓库 574MB = `node_modules` 463MB（devDependency，不随产物分发）+ `electron/release` 107MB（exe 101MB + 用户数据）+ 源码 352KB，确认「太大」只可能指前两项。两次受控构建验证 exe 能不能小：只加 `--config.compression=maximum` 产出 101224169 字节，与默认压缩的 101221724 字节无差别（包内主体已是压缩格式）；再加 afterPack 删 7 个 Electron 运行时文件（dxcompiler.dll 24.6MB、dxil.dll 1.4MB、vk_swiftshader.dll 5.3MB、vk_swiftshader_icd.json、vulkan-1.dll 0.9MB、LICENSES.chromium.html 19.5MB、ffmpeg.dll 3.0MB）产出 92051519 字节（−9%），打包态启动回归 EXIT=0 能到首帧，但代价是失去无 GPU 时的软件渲染回退和系统 ffmpeg，属未在真实机器验证的运行时改动，未采纳。结论与数据已写入 reference.md「体积构成与瘦身实测」。
+- **2026-09-13**：死代码清理并重新打包。逐条自己 grep 复核后共 39 删 4 增：清掉详情页已废弃的整套 `overview-*` 样式及配套的 `.col-right`、`.kbd`、`overview-grid + .sec` 规则，清掉无引用的 `MODEL_STATES` 常量，清掉 `main#app` 和 `#formSave` 两个死 id。app.css 81163→77975 字节（980→946 行，括号 694/694 平衡），app.js 260694→260632 字节（4716→4715 行），index.html 15831→15808 字节。清理后布局回归与基础回归通过，并从清理后的源码重新打包：`electron/release/AIHubPanel-1.2.0.exe`（101224172 字节，sha256 `c649abaf…de1a`），打包态启动回归中位数 5551ms（browserWindowCreate 41ms、serverStartup 40ms、pageToReady 371ms、domToReady 22ms），性能回归 renderer 增量 −3MiB、存储回归均退出码 0。打包前备份、打包后逐字节还原了用户真实 `config.json`/`apikey.json`。
+- **2026-09-13**：文档行号纠偏。一次清理让 `public/app.js` 行号整体前移，逐条核实后发现文档里一批 `文件:行号` 已指向错误内容（例如 `app.js:1308` 实际是 `try{`、`main.js:180` 实际是 `did-finish-load`），全部按真实符号定义重钉；同时修掉一处自查发现的重复条目。
 - **2026-09-13**：全量审计并发布 1.2.0。逐条读源码核实三份审计报告后，用 8 个提交修掉全部已确认缺陷，其中 4 个会造成数据丢失或显示错乱：拖拽排序保存失败回滚时整体重建站点对象却没让在途请求失效（模型卡和连通状态会永久停在「测试中/检测中」）；设置面板清空数字输入框被 `clampInt` 夹成最小值（并发静默变 1、超时静默变 3 秒，用户以为留空就是用默认值）；存储桥读取时按长度和控制字符重筛 Key、且没有字符串 id 的站点在迁移时被摘掉 Key（等于静默删 Key）；`config.json` 被截断时界面按「零站点」显示，用户随手保存一次就把磁盘数据彻底覆盖。其余修复：原地覆写前先留 `.bak`、主进程补 `will-navigate`/`will-redirect` 同源拦截、转发同源校验改按 URL 规范化（`AI_HUB_PORT=80` 时整站转发会被自己的校验拒掉）、发布目录清理加真实路径校验并改为先验产物再删、回归门禁里 1 条永假的布局断言和 `asMiB` 的单位错误。
 - **2026-09-13**：打包并验证 1.2.0 产物。`electron/release/AIHubPanel-1.2.0.exe`（101221724 字节，sha256 `8ce58e03…9348`），目录内只保留这一个文件。打包态启动回归以真实 exe 通过：中位数总耗时 5326ms（browserWindowCreate 37ms、serverStartup 37ms、pageToReady 326ms、domToReady 19ms），并校验 `config.json`/`apikey.json` 分文件与 `.aihubpanel-data` 都落在 exe 同级。打包前把用户真实 `config.json`/`apikey.json` 备份到 `E:\goodwork\ZCodeData\aihubpanel-release-data-backup\`，打包后还原并逐字节核对——`npm run dist` 会先清空 `electron/release/`，不备份就会连真实数据一起删掉。
 - **2026-09-13**：本轮全套回归实测通过（基础检查、布局、性能、存储、启动退出码均为 0）。性能加载 375.3ms、搜索 73.5ms、420 模型详情 116.3ms、网格切换 94.1ms、8 轮重复视图切换 2964.6ms、DOM 7095、renderer 工作集增量 0.8MiB；存储回归 60 站 2190 模型、306808 字节配置。
@@ -48,9 +51,11 @@
 - [ ] 决定 1.2.0 是否发版：打 `v1.2.0` tag 并推远端。本次请求只要求打包，未打 tag、未推。
 - [ ] 三条本轮刻意未改、留给用户拍板的项：`configureRuntimePaths()` 目录创建失败返回 `null` 时不降级也不弹窗（electron/main.js:70）；`TEMP`/`TMP`/`TMPDIR` 的赋值顺序；`buildUrl` 里用 `_` 前缀区分请求参数的约定。都已逐条核实，改动收益小于风险，故记录不改。
 - [ ] 基础回归的语法检查只覆盖仓库内的 JS/MJS/CJS，不含 `public/index.html` 的内联部分；如需覆盖要另加 HTML 校验。
+- [ ] 决定 exe 是否继续瘦身：删 7 个 Electron 运行时文件可省 9%（101221724→92051519 字节），代价是失去无 GPU 软件渲染回退与系统 ffmpeg。本轮实测能启动但未在真实机器验证，默认不采纳。
+- [ ] 根目录 `config.json`（非打包态 `npm start` 写入，已 gitignore）里存有 2 个明文 `sk-` Key，本轮未改动；`apikey.json` 拆分只覆盖桌面版 exe 的存储路径，是否要把 `npm start` 也切到分离存储需用户决定。
 
 ## 已知问题（长期）
-- portable 单文件 exe 启动会包含自解压耗时；1.2.0 打包态实测总耗时中位数 5326ms（同法 1.1.1 为 5635ms、1.1.0 约 8.0 秒，差异主要来自机器负载），应用自身页面到首帧约 0.33 秒
+- portable 单文件 exe 启动会包含自解压耗时；1.2.0 打包态实测总耗时中位数 5326ms（清理后重新打包的同版本产物为 5551ms；同法 1.1.1 为 5635ms、1.1.0 约 8.0 秒，差异主要来自机器负载），应用自身页面到首帧约 0.33-0.37 秒
 - 某些站点模型列表为空是站点分组没绑渠道，非面板问题
 - `config.json` 和 `apikey.json` 已 gitignore，前者不含 API Key，后者单独保存 API Key，两个文件都绝不提交
 - 桌面版和浏览器版数据互不同步，靠导出/导入迁移
