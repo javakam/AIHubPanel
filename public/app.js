@@ -41,6 +41,7 @@ let remoteSaveTimer = null;
 let remoteSaveActive = 0;
 let remoteSavePending = false;
 let remoteAuthSubmit = null;
+let remoteStartPending = false;
 let remoteConflictState = null;
 let remoteConflictLocalStations = null;
 let remoteLastError = null;
@@ -452,7 +453,9 @@ function setupAuthGate(){
     event.preventDefault();
     const input=document.getElementById("authPassword");
     const password=input ? input.value : "";
+    // 启动失败后 remoteAuthSubmit 为空，此时提交作为「重试连接」入口，而不是无响应。
     if(remoteAuthSubmit) remoteAuthSubmit(password);
+    else void startApp();
   });
 }
 function remoteJson(response){
@@ -492,14 +495,26 @@ async function loginRemote(){
     await new Promise(resolve=>setTimeout(resolve,200));
   }
 }
+async function logoutRemote(){
+  // 无论服务端登出是否成功都整页重载回登录门：登出后本地内存里的共享数据不应继续展示。
+  try{ await fetch(REMOTE_LOGOUT_PATH,{ method:"POST", credentials:"same-origin", cache:"no-store" }); }
+  catch(_){ /* 服务不可达时同样放弃本地状态；重载后登录门会给出可重试的错误提示 */ }
+  window.location.reload();
+}
 async function bootstrapRemoteState(){
   const sessionResponse=await fetch(REMOTE_SESSION_PATH,{credentials:"same-origin",cache:"no-store"});
   if(sessionResponse.status===404) return false;
-  if(!sessionResponse.ok) throw new Error("共享模式启动失败："+sessionResponse.status);
-  remoteMode=true;
+  if(!sessionResponse.ok) throw new Error(`共享服务响应异常（HTTP ${sessionResponse.status}）`);
   const session=await remoteJson(sessionResponse);
+  if(session.shared===false) return false;
+  // remoteMode 必须在确认共享模式后才置真：本地模式提前返回时不能残留远端标记。
+  remoteMode=true;
   if(!session.authenticated) await loginRemote();
-  else remoteCsrfToken=typeof session.csrfToken==="string" ? session.csrfToken : "";
+  else{
+    remoteCsrfToken=typeof session.csrfToken==="string" ? session.csrfToken : "";
+    // 启动失败重试时登录门可能已显示；会话仍有效则直接收门。
+    hideAuthGate();
+  }
   const stateResponse=await remoteFetch(REMOTE_STATE_PATH);
   if(!stateResponse.ok){
     const body=await remoteJson(stateResponse);
@@ -4884,6 +4899,7 @@ function bindGlobal(){
       else if(action==="export") exportJSON();
       else if(action==="settings") openSettings();
       else if(action==="theme") cycleTheme();
+      else if(action==="logout") void logoutRemote();
     };
   });
   document.getElementById("btnExport").onclick = exportJSON;
@@ -4925,8 +4941,9 @@ function bindGlobal(){
     if(e.key==="Escape"){
       if(isMoreMenuOpen()){ closeMoreMenu(true); return; }
       if(openModal){
-        if(openModal.id!=="formModal") hideModal(openModal.id);
-        else e.preventDefault();
+        // data-backdrop-close="false" 的弹窗（站点表单、冲突三选一）只允许显式按钮退出，Esc 不误关。
+        if(openModal.dataset.backdropClose==="false") e.preventDefault();
+        else hideModal(openModal.id);
         return;
       }
       if(focusId){ closeFocus(); return; }
@@ -4966,12 +4983,16 @@ function bindGlobal(){
 
 /* ---------------- 启动 ---------------- */
 async function startApp(){
+  if(remoteStartPending) return;
+  remoteStartPending=true;
   setupAuthGate();
   try{
     await bootstrapRemoteState();
   }catch(error){
     console.error("共享模式启动失败", error);
-    showAuthGate(error && error.message ? error.message : "共享模式启动失败，请检查服务");
+    const detail=error && error.message ? error.message : "未知错误";
+    showAuthGate(`连接共享服务失败：${detail}。请确认 NAS 服务可达后，再次点击「登录」重试。`);
+    remoteStartPending=false;
     return;
   }
   load();
@@ -4985,6 +5006,8 @@ async function startApp(){
   render();
   syncDetailOffset();
   remoteInitialStations=null;
+  const menuLogout=document.getElementById("menuLogout");
+  if(menuLogout) menuLogout.hidden=!remoteMode;
   if(remoteMode){
     document.addEventListener("visibilitychange", ()=>{ if(!document.hidden) refreshRemoteRevision(); });
     window.addEventListener("focus", refreshRemoteRevision);

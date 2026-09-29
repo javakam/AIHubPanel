@@ -125,17 +125,22 @@ function stateErrorResponse(res, method, status, code, message, extra = {}) {
 async function handleSharedStateRoute(req, res, pathname) {
   const isSharedPath = pathname.startsWith("/api/auth/") || pathname === "/api/state" || pathname === "/api/state/meta";
   if (!isSharedPath) return false;
-  if (!SHARED_STATE_ENABLED) {
-    sendText(res, req.method || "GET", 404, "Not Found");
-    return true;
-  }
   const method = req.method || "GET";
   if (pathname === "/api/auth/session") {
     if (method !== "GET" && method !== "HEAD") {
       stateErrorResponse(res, method, 405, "method_not_allowed", "仅支持 GET 和 HEAD 请求");
       return true;
     }
-    sendJson(res, method, 200, auth.sessionInfo(req));
+    // 未开启共享模式时同样回 200 契约：前端据此走本地模式，浏览器控制台不再留下 404 网络错误。
+    if (!SHARED_STATE_ENABLED) {
+      sendJson(res, method, 200, { shared: false, authenticated: false });
+      return true;
+    }
+    sendJson(res, method, 200, { shared: true, ...auth.sessionInfo(req) });
+    return true;
+  }
+  if (!SHARED_STATE_ENABLED) {
+    sendText(res, req.method || "GET", 404, "Not Found");
     return true;
   }
   if (pathname === "/api/auth/login") {

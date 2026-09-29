@@ -172,6 +172,20 @@ function runReleaseAndDefaultChecks() {
       !/await reorder\(drag\.fromId,latestDrop\.toId,latestDrop\.after\)/.test(appSource)) {
     throw new Error("station reorder must await NAS persistence before reporting success");
   }
+  if (!/let remoteStartPending = false;/.test(appSource) ||
+      !/if\(remoteAuthSubmit\) remoteAuthSubmit\(password\);\s*else void startApp\(\);/.test(appSource)) {
+    throw new Error("auth gate must retry startApp when bootstrap fails");
+  }
+  if (!/openModal\.dataset\.backdropClose==="false"\) e\.preventDefault\(\)/.test(appSource)) {
+    throw new Error("mandatory modals (form/conflict) must not be dismissed via Escape");
+  }
+  if (!/else if\(action==="logout"\) void logoutRemote\(\);/.test(appSource)) {
+    throw new Error("more-menu logout action must be wired to logoutRemote");
+  }
+  const cssSource = fs.readFileSync(path.join(ROOT, "public/app.css"), "utf8");
+  if (!/\.panel footer\{[^}]*flex-wrap:wrap/.test(cssSource)) {
+    throw new Error("modal footers must wrap on narrow screens (conflict modal has 3 buttons)");
+  }
 }
 
 async function runServerSmoke() {
@@ -183,6 +197,7 @@ async function runServerSmoke() {
     await waitForServer(baseUrl, child);
     await expectFetch("static index", `${baseUrl}/`, {}, { status: 200, includes: "AIHubPanel" });
     await expectFetch("proxy health", `${baseUrl}/api/proxy/health`, { method: "HEAD" }, { status: 200, header: ["x-aihub-proxy", "1"] });
+    await expectFetch("local session contract", `${baseUrl}/api/auth/session`, {}, { status: 200, includes: '"shared":false' });
     await expectFetch("static method guard", `${baseUrl}/`, { method: "POST" }, { status: 405 });
     await expectFetch("static path guard", `${baseUrl}/%2e%2e/server.mjs`, {}, { status: [403, 404] });
     await expectFetch("proxy same-origin guard", `${baseUrl}/api/proxy?url=${encodeURIComponent("https://example.com")}`, {}, { status: 403, jsonCode: "same_origin_required" });

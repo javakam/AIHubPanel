@@ -150,6 +150,9 @@ async function run() {
     if (sessionBody.authenticated !== true || sessionBody.csrfToken !== loginBody.csrfToken) {
       throw new Error("session response did not preserve authentication state");
     }
+    if (sessionBody.shared !== true) {
+      throw new Error("shared-mode session response must declare shared:true");
+    }
 
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const failedLogin = await fetch(`${baseUrl}/api/auth/login`, {

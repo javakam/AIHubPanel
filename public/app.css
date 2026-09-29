@@ -498,7 +498,7 @@
   #stationForm .content{display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 12px}
   /* 普通填写时 URL 与 Key 各占一列，既能完整看清，也让快速导入后的确认无需滚动。 */
   #stationForm .quick-import,#stationForm .field-note,#stationForm .adv-toggle,#stationForm .form-row.adv{grid-column:1 / -1}
-  .panel footer{position:sticky; bottom:0; z-index:1; padding:12px 20px; border-top:1px solid var(--bd); display:flex; gap:10px; justify-content:flex-end; background:rgba(17,23,39,.94); backdrop-filter:blur(10px)}
+  .panel footer{position:sticky; bottom:0; z-index:1; padding:12px 20px; border-top:1px solid var(--bd); display:flex; flex-wrap:wrap; gap:10px; justify-content:flex-end; background:rgba(17,23,39,.94); backdrop-filter:blur(10px)}
   .form-row{margin-bottom:10px}
   #stationForm .form-row{margin-bottom:8px}
   .form-row label{display:block; font-size:12.5px; color:var(--dim); margin-bottom:5px}
