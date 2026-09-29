@@ -1,7 +1,7 @@
 # AIHubPanel 当前状态
 
 ## 正在做什么
-本轮完成飞牛 NAS Docker 共享状态改造的入库与收尾审计：共享样式块缩进归位、`.dockerignore` 补 `*.bat`、compose 增加 `mem_limit: 512m` 护栏、删除已落地的 `docs/superpowers` 施工手册；六套回归串行全绿后以 feat(docker) 入库（d617e23）。剩余唯一缺口在真实 Docker 环境：镜像构建、`/data` 写权限、容器重启恢复和反代 HTTPS 验收，须在飞牛 NAS 上执行。
+本轮完成全量审计（功能 + 显示）：代码切片精读 + 真实浏览器双模式实测（本地/共享，含登录门、冲突弹窗、375px 窄屏、死门场景）。发现 2 个 P1、4 个 P2、6 个 P3，全部记录在待办，等用户确认修复范围；本轮未改任何代码。上一轮 Docker 改造已入库（d617e23），NAS 真机验收仍是唯一外部缺口。
 
 ## 最近完成（近三日）
 - **2026-09-29**：共享状态改造入库（d617e23）。收尾审计 4 项：`public/app.css` 共享块缩进归位两空格；`.dockerignore` 补 `*.bat`；`compose.yaml` 加 `mem_limit: 512m`（`NODE_OPTIONS` 只限 V8 堆，容器级护栏防泄漏拖垮 NAS，原子写保证 OOM 不损坏 `state.json`）；删除 `docs/superpowers/` 施工手册（内容已全部落地）。刻意不改三项：不加 gzip（LAN 下 260KB 静态资源收益太小）、不加 SIGTERM 处理（compose 有 `init: true`，直连 docker run 超时后 SIGKILL 在原子写下安全）、不固定 node 镜像 digest。六套回归串行全绿：基础+共享、布局、性能（repeat 4025.1ms、renderer 增量 −9.6MiB、DOM 7113）、存储、启动（源码态中位数 855ms）。
@@ -64,6 +64,9 @@
 - [ ] 在飞牛 NAS 或有 Docker Daemon 的主机上执行镜像构建、健康检查、`/data` 写权限、容器重启恢复和反向代理 HTTPS 验收。
 - [x] 复核共享状态备份恢复边界：主文件语法损坏和结构损坏都覆盖回归，恢复失败时不返回敏感路径信息。
 - [x] 复核共享模式结构性保存：设置代理变化和拖拽排序都会等待 NAS 写入，失败或冲突会回滚并提示。
+- [ ] 【2026-09-30 审计·待拍板】P1×2：①登录门启动失败死锁（startApp catch 后 remoteAuthSubmit 为 null，表单提交无响应，错误显示英文原文 "Failed to fetch"，仅能手动刷新，浏览器实测复现）；②冲突弹窗窄屏溢出（.btn white-space:nowrap + .panel footer 无 flex-wrap，375px 实测「导出本机数据」按钮左溢屏幕外 61px）。
+- [ ] 【2026-09-30 审计·待拍板】P2×4：①共享模式无登出入口（REMOTE_LOGOUT_PATH 死常量，服务端 /api/auth/logout 已实现但前端无按钮）；②本地模式每次加载控制台必现 GET /api/auth/session 404（违背控制台无错质量线，桌面版同样）；③冲突弹窗 data-backdrop-close="false" 但 Esc 仍可关（app.js:4925 对非 formModal 一律放行）；④electron/main.js startServer 只清 AI_HUB_ALLOWED_ORIGIN，未清 SHARED_STATE/ADMIN_PASSWORD/SESSION_SECRET/DATA_DIR 四变量，系统环境残留会让桌面版启动即抛。
+- [ ] 【2026-09-30 审计·待拍板】P3×6：①reloadRemoteConflict/overwriteRemoteConflict 直接重建 stations 未逐站 invalidateStation（在途结果静默丢弃、请求 Map 残留）；②refreshRemoteRevision 无 try/catch，NAS 不可达时每次切标签页产生 unhandled rejection；③首次迁移成功后不清 localStorage 旧站点，NAS 清空后会提示复活已删站点；④登录限流按 socket.remoteAddress，反代后所有用户共享 5 次/5 分钟一个桶；⑤容器重启会话丢失需重登录，README 未说明；⑥打包态 server/*.mjs 的 asarUnpack 链路未实测（模式与 public/** 一致，下次 npm run dist 时验证）。
 
 ## 已知问题（长期）
 - portable 单文件 exe 启动会包含自解压耗时；1.2.0 打包态实测总耗时中位数 5326ms（清理后重新打包的同版本产物为 5551ms；同法 1.1.1 为 5635ms、1.1.0 约 8.0 秒，差异主要来自机器负载），应用自身页面到首帧约 0.33-0.37 秒
