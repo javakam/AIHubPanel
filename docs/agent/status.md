@@ -1,9 +1,10 @@
 # AIHubPanel 当前状态
 
 ## 正在做什么
-本轮「飞牛 NAS Docker 共享状态改造」已完成源码、浏览器和本机回归审计，并修复了主状态文件结构损坏时未尝试 `.bak`、共享模式设置不提交站点状态、拖拽排序未等待 NAS 保存三个缺口。采用单容器、无运行时依赖、`/data/state.json` 持久化、登录和版本冲突保护的方案；Electron 桌面版和未开启共享模式的浏览器版保持原行为。Docker CLI 不在本机，镜像构建、飞牛挂载权限和 NAS 重启验收尚未在真实 Docker 环境执行，不能标记为已验证。
+本轮完成飞牛 NAS Docker 共享状态改造的入库与收尾审计：共享样式块缩进归位、`.dockerignore` 补 `*.bat`、compose 增加 `mem_limit: 512m` 护栏、删除已落地的 `docs/superpowers` 施工手册；六套回归串行全绿后以 feat(docker) 入库（d617e23）。剩余唯一缺口在真实 Docker 环境：镜像构建、`/data` 写权限、容器重启恢复和反代 HTTPS 验收，须在飞牛 NAS 上执行。
 
 ## 最近完成（近三日）
+- **2026-09-29**：共享状态改造入库（d617e23）。收尾审计 4 项：`public/app.css` 共享块缩进归位两空格；`.dockerignore` 补 `*.bat`；`compose.yaml` 加 `mem_limit: 512m`（`NODE_OPTIONS` 只限 V8 堆，容器级护栏防泄漏拖垮 NAS，原子写保证 OOM 不损坏 `state.json`）；删除 `docs/superpowers/` 施工手册（内容已全部落地）。刻意不改三项：不加 gzip（LAN 下 260KB 静态资源收益太小）、不加 SIGTERM 处理（compose 有 `init: true`，直连 docker run 超时后 SIGKILL 在原子写下安全）、不固定 node 镜像 digest。六套回归串行全绿：基础+共享、布局、性能（repeat 4025.1ms、renderer 增量 −9.6MiB、DOM 7113）、存储、启动（源码态中位数 855ms）。
 - **2026-09-18**：完成飞牛 NAS Docker 共享状态改造。新增 `server/auth.mjs`、`server/state-store.mjs`、`scripts/shared-state-regression.mjs`、`Dockerfile`、`compose.yaml` 和 `.dockerignore`；服务端增加 HttpOnly 会话、CSRF、失败限流、原子状态写入、`.bak` 恢复和版本冲突；前端在共享模式下把站点、API Key、模型列表和测试结果放到 NAS，浏览器只保留界面状态。
 - **2026-09-18**：修复共享状态收尾问题：首次本机配置迁移返回空站点、保存失败后待保存标记残留、会话过期保存不重试、冲突重新加载仍保留旧表单、强制覆盖丢失冲突前本机修改；同时补上共享模式错误配置快速失败、密码长度限制、Docker 默认 NAS 直连和 Node 堆上限。
 - **2026-09-18**：本机验证 `npm test` 全部通过；共享模式浏览器实测登录、添加站点、服务重启恢复、双页面冲突、重新加载、强制覆盖和控制台错误检查通过。最终性能回归重复视图操作 3695.6ms，renderer 工作集增量 -2.5MiB，DOM 7113。

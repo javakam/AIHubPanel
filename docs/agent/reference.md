@@ -94,6 +94,8 @@
 - `AI_HUB_ALLOWED_ORIGIN` 必须填写三台主机共同使用的完整来源，不能把 NAS IP、域名和端口混着用；HTTPS 反向代理下同时把 `AI_HUB_COOKIE_SECURE=1`
 - 共享数据只在 `/data/state.json` 和 `/data/state.json.bak`，写入经过临时文件、`sync`、备份轮换和串行队列；三台主机同时保存时按 revision 返回 409，不静默覆盖
 - Dockerfile 设置 `NODE_OPTIONS=--max-old-space-size=256` 作为内存上限；这限制 V8 堆，不等于容器完整 RSS 上限
+- `compose.yaml` 另设 `mem_limit: 512m` 容器级护栏：V8 之外的 RSS 增长由 cgroup 拦截；写盘走临时文件+rename，OOM 强杀不会损坏 `state.json`，`restart: unless-stopped` 自动拉起
+- 2026-09-29 审计后刻意不改三项：不加 gzip（LAN 下 app.js 261KB 传输收益太小，不值复杂度）；不加 SIGTERM 处理（compose `init: true` 负责信号转发与收尸；直连 `docker run` 无 init 时 `docker stop` 最多等 10s 后 SIGKILL，原子写下安全）；不固定 `node:24-alpine` digest（家用 NAS 浮动 major tag 可接受）
 - 主状态文件读取时，语法错误、JSON 结构错误或字段超限都会尝试从 `.bak` 恢复；主文件不存在仍按首次启动返回空状态。该边界由 `scripts/shared-state-regression.mjs` 覆盖
 - 本机 2026-09-19 已完成源码、Node 回归和浏览器双页面审计；静态 Docker 检查通过，但没有 Docker CLI，飞牛 NAS 上仍需实测镜像构建、宿主机 `data/` 写权限、健康检查、重启恢复和 HTTPS 反向代理
 
@@ -163,6 +165,7 @@
 - 诊断用的临时脚本用完即删，不要留在 `scripts/` 下（会混进 diff 和 `npm test` 的目录约定）；也别写进 `/tmp`（Git Bash 的 `/tmp` 就是 C 盘用户临时目录），放 `E:\goodwork\ZCodeData\zcode-probe\`。
 
 ## 性能 / 内存审计记录
+- **2026-09-29**：共享状态改造入库前全量复测（串行，先清 electron 残留）：seeded load 377.4ms、搜索 117.8ms、420 模型详情 181.8ms、网格切换 111.5ms、8 轮重复视图 4025.1ms、renderer 工作集增量 −9.6MiB、DOM 7113；启动回归源码态中位数 855ms（pageToReady 639ms）；基础、共享状态、布局、存储、启动五套退出码均为 0。
 - **2026-09-19**：修复共享状态备份恢复边界后串行执行 `npm test` 全部通过；性能 seeded load 220.3ms、搜索 75.0ms、420 模型详情 130.2ms、网格切换 99.9ms、8 轮重复视图操作 3038.8ms、renderer 工作集增量 −3.3MiB、DOM 7113。此前一次独占回归受 Windows/Electron 调度影响，`search-clear` 短暂达到 835.4ms，紧接着单独重跑为 190.2ms；性能门禁仍保持原阈值，执行时必须清理残留 Electron 并串行运行
 - **2026-09-13**：死代码清理后复测（清理只删样式与常量，不动逻辑）：布局、基础、打包态启动、性能、存储五套退出码均为 0；性能回归 renderer 工作集增量为 −3MiB，即清理后比清理前更省；打包态启动中位数 5551ms（明细见上节）。
 - **2026-09-13**：审计后全套复测（串行执行，跑前清掉残留 electron）：seeded load 464.7ms、搜索过滤 78.1ms、420 模型详情 159ms、网格切换 122.5ms、8 轮重复视图操作 4293.6ms、DOM 7095、renderer 工作集增量 0.3MiB；启动回归源码态中位数 685ms（browserWindowCreate 39ms、serverStartup 41ms、pageToReady 439ms、domToReady 26ms）。同一轮布局、存储、启动套件退出码均为 0。
