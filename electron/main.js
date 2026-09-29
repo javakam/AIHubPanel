@@ -112,6 +112,13 @@ async function startServer() {
   // 用户系统里若设过这个变量，同源校验就只认那个 origin，本窗口的请求会被一律拒掉。
   // 桌面版固定回环监听，用不上它，清掉以免继承到外部配置。
   delete process.env.AI_HUB_ALLOWED_ORIGIN;
+  // 共享状态模式属于 NAS 部署形态；系统环境里残留这些变量会让 server.mjs 顶层校验直接抛错，
+  // 桌面版始终走本地浏览器存储，一并清掉。
+  delete process.env.AI_HUB_SHARED_STATE;
+  delete process.env.AI_HUB_ADMIN_PASSWORD;
+  delete process.env.AI_HUB_SESSION_SECRET;
+  delete process.env.AI_HUB_DATA_DIR;
+  delete process.env.AI_HUB_COOKIE_SECURE;
 
   // server.mjs 在模块顶层就建目录、校验参数并 listen；配置不合法会直接抛，
   // 在这里能原样拿到错误信息，比从子进程的 stderr 里捞更准。
