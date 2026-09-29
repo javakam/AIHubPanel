@@ -549,6 +549,29 @@
 
   .muted{color:var(--dim)}
 
+  .auth-gate{
+    position:fixed; inset:0; z-index:100; display:grid; place-items:center; padding:20px;
+    background:var(--bg); color:var(--tx);
+  }
+  .auth-panel{
+    width:min(380px,100%); padding:28px; border:1px solid var(--bd); border-radius:12px;
+    background:var(--sf); box-shadow:var(--shadow-sm);
+  }
+  .auth-mark{
+    width:34px; height:34px; display:grid; place-items:center; margin-bottom:16px;
+    border-radius:9px; background:var(--pri); color:#fff; font-size:12px; font-weight:800;
+  }
+  .auth-panel h1{margin:0 0 6px; font-size:20px}
+  .auth-panel p{margin:0 0 20px; color:var(--dim); font-size:13px}
+  .auth-panel label{display:block; margin-bottom:6px; color:var(--dim); font-size:13px}
+  .auth-panel input{
+    width:100%; height:42px; padding:0 12px; margin-bottom:10px; border:1px solid var(--bd);
+    border-radius:9px; background:var(--bg); color:var(--tx); outline:none;
+  }
+  .auth-panel input:focus{border-color:var(--pri); box-shadow:0 0 0 3px var(--pri-soft)}
+  .auth-panel button{width:100%; justify-content:center}
+  .auth-error{min-height:20px; margin:2px 0 10px; color:var(--err); font-size:12.5px; overflow-wrap:anywhere}
+
   /* ---------- v8 · 克制的工作台视觉 ----------
      去除大面积渐变、发光和玻璃拟态。亮色以中性白/灰作为阅读底，
      蓝色只承担「当前选择 / 主操作 / 聚焦」三种语义，避免整页发紫发亮。 */

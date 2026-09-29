@@ -80,8 +80,22 @@
 - `AI_HUB_HOST` 监听地址（默认 127.0.0.1）
 - `AI_HUB_ALLOWED_ORIGIN` 非回环监听时必须设置
 - `AI_HUB_PROXY_TIMEOUT_MS` 转发超时（默认 120000）
+- `AI_HUB_SHARED_STATE=1` 开启 NAS 共享状态；未开启时继续使用原有浏览器本地存储
+- `AI_HUB_DATA_DIR` 共享状态目录（Docker 默认 `/data`）
+- `AI_HUB_ADMIN_PASSWORD` 共享模式登录密码
+- `AI_HUB_SESSION_SECRET` 共享模式会话密钥，至少 16 个字符
+- `AI_HUB_COOKIE_SECURE` HTTPS 访问时设为 `1`，直接 HTTP 内网访问时设为 `0`
 - `AIHUB_BOOT_TRACE` 启动耗时诊断日志文件路径（设了就开探针）
 - `PORTABLE_EXECUTABLE_DIR` / `PORTABLE_EXECUTABLE_FILE` 由便携启动器提供，用来确定用户实际 exe 的同级配置目录
+
+## 飞牛 NAS / Docker
+- Docker 运行时只复制 `server.mjs`、`server/` 和 `public/`，不复制 Electron、`node_modules`、桌面配置、`data/` 或文档；容器使用 Node 非 root 用户、只读根文件系统、临时 `/tmp`、丢弃 Linux capabilities 和 `no-new-privileges`
+- `compose.yaml` 默认把 NAS 的 4179 端口绑定到所有网卡，适合三台主机通过固定 NAS 地址访问；只走飞牛 HTTPS 反向代理时把 `AI_HUB_BIND` 改为 `127.0.0.1`
+- `AI_HUB_ALLOWED_ORIGIN` 必须填写三台主机共同使用的完整来源，不能把 NAS IP、域名和端口混着用；HTTPS 反向代理下同时把 `AI_HUB_COOKIE_SECURE=1`
+- 共享数据只在 `/data/state.json` 和 `/data/state.json.bak`，写入经过临时文件、`sync`、备份轮换和串行队列；三台主机同时保存时按 revision 返回 409，不静默覆盖
+- Dockerfile 设置 `NODE_OPTIONS=--max-old-space-size=256` 作为内存上限；这限制 V8 堆，不等于容器完整 RSS 上限
+- 主状态文件读取时，语法错误、JSON 结构错误或字段超限都会尝试从 `.bak` 恢复；主文件不存在仍按首次启动返回空状态。该边界由 `scripts/shared-state-regression.mjs` 覆盖
+- 本机 2026-09-19 已完成源码、Node 回归和浏览器双页面审计；静态 Docker 检查通过，但没有 Docker CLI，飞牛 NAS 上仍需实测镜像构建、宿主机 `data/` 写权限、健康检查、重启恢复和 HTTPS 反向代理
 
 ## 关键外部路径（不在仓库内）
 - 本地测试桩：`E:\goodwork\ZCodeData\aihub-probe\mock-upstream.mjs`
@@ -121,6 +135,7 @@
 - Electron 错误路径用 `dialog.showErrorBox` + `app.exit(1)`，用户行为不变
 - API 请求链固定发起时的 `stationRevision`；自动客户端修复不得在站点编辑/删除后写回旧配置，过期响应体要取消以释放连接。
 - 删除或编辑保存失败回滚时要恢复站点、模型勾选、Key 显示和排序快照；站点请求已失效时保留新 revision，避免模型卡永久停在“测试中”。
+- 共享模式下结构性站点修改必须等待 `persistStationsNow()` 完成；设置里的代理变化会重置连通状态并提交站点状态，拖拽排序也必须等待 NAS 写入后才提示成功。失败或 revision 冲突要恢复内存快照。
 - API Key 掩码的首尾保留量固定（列表 8+6，详情 6+4）。长度不足 15 位时两段会重叠、把整个 Key 拼回来（11-14 位即全部字符可见），这种长度必须退回短掩码（public/app.js:516）。掩码长度不随 Key 真实长度伸缩，否则等于把「Key 有多长」也一并泄露。
 - 数值归一化统一走 `optionalNumber`（public/app.js:166）：`Number(null)` 和 `Number("")` 都是 0，会把「没测到」写成「首字 0ms」「HTTP 0」。
 - 脱敏必须先替换再截断（public/app.js:1141）。反过来会把跨越截断边界的完整 Key 切成两段，替换匹配不到，明文片段就留在日志和错误提示里。
@@ -148,6 +163,7 @@
 - 诊断用的临时脚本用完即删，不要留在 `scripts/` 下（会混进 diff 和 `npm test` 的目录约定）；也别写进 `/tmp`（Git Bash 的 `/tmp` 就是 C 盘用户临时目录），放 `E:\goodwork\ZCodeData\zcode-probe\`。
 
 ## 性能 / 内存审计记录
+- **2026-09-19**：修复共享状态备份恢复边界后串行执行 `npm test` 全部通过；性能 seeded load 220.3ms、搜索 75.0ms、420 模型详情 130.2ms、网格切换 99.9ms、8 轮重复视图操作 3038.8ms、renderer 工作集增量 −3.3MiB、DOM 7113。此前一次独占回归受 Windows/Electron 调度影响，`search-clear` 短暂达到 835.4ms，紧接着单独重跑为 190.2ms；性能门禁仍保持原阈值，执行时必须清理残留 Electron 并串行运行
 - **2026-09-13**：死代码清理后复测（清理只删样式与常量，不动逻辑）：布局、基础、打包态启动、性能、存储五套退出码均为 0；性能回归 renderer 工作集增量为 −3MiB，即清理后比清理前更省；打包态启动中位数 5551ms（明细见上节）。
 - **2026-09-13**：审计后全套复测（串行执行，跑前清掉残留 electron）：seeded load 464.7ms、搜索过滤 78.1ms、420 模型详情 159ms、网格切换 122.5ms、8 轮重复视图操作 4293.6ms、DOM 7095、renderer 工作集增量 0.3MiB；启动回归源码态中位数 685ms（browserWindowCreate 39ms、serverStartup 41ms、pageToReady 439ms、domToReady 26ms）。同一轮布局、存储、启动套件退出码均为 0。
 - **2026-09-13**：并发跑多个 Electron 套件时 `repeat-view-cycles` 曾实测 4595.5ms 超出 4500ms 预算，改为串行后回到 4293.6ms。该门禁对机器负载敏感，结论要以独占运行为准。

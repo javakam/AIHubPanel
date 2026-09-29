@@ -8,6 +8,8 @@ import path from "node:path";
 import net from "node:net";
 import { Transform } from "node:stream";
 import { fileURLToPath } from "node:url";
+import { createAuth } from "./server/auth.mjs";
+import { createStateStore } from "./server/state-store.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(HERE, "public");
@@ -25,9 +27,28 @@ if (process.env.AI_HUB_PROXY_TIMEOUT_MS && Number(process.env.AI_HUB_PROXY_TIMEO
 const PROXY_MAX_BODY_BYTES = 10 * 1024 * 1024;
 // 模型目录与诊断响应通常很小；为异常公网目标设置硬上限，避免 relay 长时间转发无限响应。
 const PROXY_MAX_RESPONSE_BYTES = 50 * 1024 * 1024;
+const SHARED_STATE_REQUESTED = /^(1|true|yes)$/i.test(String(process.env.AI_HUB_SHARED_STATE || ""));
+if (SHARED_STATE_REQUESTED &&
+  (typeof process.env.AI_HUB_ADMIN_PASSWORD !== "string" || process.env.AI_HUB_ADMIN_PASSWORD.length === 0 ||
+   typeof process.env.AI_HUB_SESSION_SECRET !== "string" || process.env.AI_HUB_SESSION_SECRET.length < 16)) {
+  throw new Error("共享状态模式需要设置 AI_HUB_ADMIN_PASSWORD 和至少 16 个字符的 AI_HUB_SESSION_SECRET");
+}
+const SHARED_STATE_ENABLED = SHARED_STATE_REQUESTED &&
+  typeof process.env.AI_HUB_ADMIN_PASSWORD === "string" &&
+  process.env.AI_HUB_ADMIN_PASSWORD.length > 0 &&
+  typeof process.env.AI_HUB_SESSION_SECRET === "string" &&
+  process.env.AI_HUB_SESSION_SECRET.length >= 16;
+const SHARED_STATE_MAX_BODY_BYTES = 20 * 1024 * 1024;
+const SHARED_STATE_DATA_DIR = process.env.AI_HUB_DATA_DIR || path.join(HERE, "data");
 const RAW_ALLOWED_PROXY_ORIGIN = String(process.env.AI_HUB_ALLOWED_ORIGIN || "").trim();
 const ALLOWED_PROXY_ORIGIN = normaliseConfiguredOrigin(RAW_ALLOWED_PROXY_ORIGIN);
 const IS_LOOPBACK_BIND = isLoopbackBindHost(HOST);
+const stateStore = SHARED_STATE_ENABLED ? createStateStore({ dataDir: SHARED_STATE_DATA_DIR }) : null;
+const auth = SHARED_STATE_ENABLED ? createAuth({
+  password: process.env.AI_HUB_ADMIN_PASSWORD,
+  sessionSecret: process.env.AI_HUB_SESSION_SECRET,
+  secureCookie: /^(1|true|yes)$/i.test(String(process.env.AI_HUB_COOKIE_SECURE || ""))
+}) : null;
 if (RAW_ALLOWED_PROXY_ORIGIN && !ALLOWED_PROXY_ORIGIN) {
   throw new Error("AI_HUB_ALLOWED_ORIGIN 必须是有效的 http(s) origin，例如 http://192.168.1.20:4179");
 }
@@ -62,6 +83,149 @@ function sendText(res, method, status, message, extraHeaders = {}) {
   res.writeHead(status, { ...BASE_HEADERS, "Content-Type": "text/plain; charset=utf-8", ...extraHeaders });
   if (method !== "HEAD") res.end(message);
   else res.end();
+}
+
+function sendJson(res, method, status, body, extraHeaders = {}) {
+  const payload = JSON.stringify(body);
+  res.writeHead(status, {
+    ...BASE_HEADERS,
+    "Content-Type": "application/json; charset=utf-8",
+    ...extraHeaders
+  });
+  if (method !== "HEAD") res.end(payload);
+  else res.end();
+}
+
+async function readJsonBody(req, maxBytes) {
+  let received = 0;
+  const chunks = [];
+  for await (const chunk of req) {
+    received += chunk.length;
+    if (received > maxBytes) {
+      const error = new Error("request-body-too-large");
+      error.code = "BODY_TOO_LARGE";
+      throw error;
+    }
+    chunks.push(chunk);
+  }
+  if (!received) return {};
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    const error = new Error("invalid-json");
+    error.code = "INVALID_JSON";
+    throw error;
+  }
+}
+
+function stateErrorResponse(res, method, status, code, message, extra = {}) {
+  sendJson(res, method, status, { error: { code, message }, ...extra });
+}
+
+async function handleSharedStateRoute(req, res, pathname) {
+  const isSharedPath = pathname.startsWith("/api/auth/") || pathname === "/api/state" || pathname === "/api/state/meta";
+  if (!isSharedPath) return false;
+  if (!SHARED_STATE_ENABLED) {
+    sendText(res, req.method || "GET", 404, "Not Found");
+    return true;
+  }
+  const method = req.method || "GET";
+  if (pathname === "/api/auth/session") {
+    if (method !== "GET" && method !== "HEAD") {
+      stateErrorResponse(res, method, 405, "method_not_allowed", "仅支持 GET 和 HEAD 请求");
+      return true;
+    }
+    sendJson(res, method, 200, auth.sessionInfo(req));
+    return true;
+  }
+  if (pathname === "/api/auth/login") {
+    if (method !== "POST") {
+      stateErrorResponse(res, method, 405, "method_not_allowed", "仅支持 POST 请求");
+      return true;
+    }
+    try {
+      const body = await readJsonBody(req, 64 * 1024);
+      const result = await auth.handleLogin(req, body);
+      sendJson(res, method, result.status, result.body, result.headers);
+    } catch (error) {
+      const code = error?.code === "BODY_TOO_LARGE" ? "body_too_large" : "invalid_json";
+      const message = code === "body_too_large" ? "请求体不能超过 64 KiB" : "请求体必须是合法 JSON";
+      stateErrorResponse(res, method, code === "body_too_large" ? 413 : 400, code, message);
+    }
+    return true;
+  }
+  if (pathname === "/api/auth/logout") {
+    if (method !== "POST") {
+      stateErrorResponse(res, method, 405, "method_not_allowed", "仅支持 POST 请求");
+      return true;
+    }
+    const result = auth.handleLogout(req);
+    sendJson(res, method, result.status, result.body, result.headers);
+    return true;
+  }
+  if (pathname === "/api/state" || pathname === "/api/state/meta") {
+    const session = auth.authenticateRequest(req);
+    if (!session) {
+      stateErrorResponse(res, method, 401, "authentication_required", "请先登录");
+      return true;
+    }
+    if (pathname === "/api/state/meta") {
+      if (method !== "GET" && method !== "HEAD") {
+        stateErrorResponse(res, method, 405, "method_not_allowed", "仅支持 GET 和 HEAD 请求");
+        return true;
+      }
+      sendJson(res, method, 200, { revision: await stateStore.getRevision() });
+      return true;
+    }
+    if (method === "GET" || method === "HEAD") {
+      const state = await stateStore.read();
+      sendJson(res, method, 200, { revision: state.revision, stations: state.stations }, {
+        ETag: `"${state.revision}"`
+      });
+      return true;
+    }
+    if (method !== "PUT") {
+      stateErrorResponse(res, method, 405, "method_not_allowed", "仅支持 GET、HEAD 和 PUT 请求");
+      return true;
+    }
+    if (!auth.csrfValid(req)) {
+      stateErrorResponse(res, method, 403, "csrf_required", "请求校验失败，请刷新页面后重试");
+      return true;
+    }
+    try {
+      const body = await readJsonBody(req, SHARED_STATE_MAX_BODY_BYTES);
+      if (!body || typeof body !== "object" || Array.isArray(body) ||
+        !Number.isSafeInteger(Number(body.revision)) || !Array.isArray(body.stations)) {
+        stateErrorResponse(res, method, 400, "invalid_state", "共享状态格式不合法");
+        return true;
+      }
+      const next = await stateStore.replace(Number(body.revision), body.stations);
+      sendJson(res, method, 200, { revision: next.revision }, {
+        ETag: `"${next.revision}"`
+      });
+    } catch (error) {
+      if (error?.code === "REVISION_CONFLICT") {
+        const current = await stateStore.read();
+        stateErrorResponse(res, method, 409, "revision_conflict", "共享状态已被其他设备更新", {
+          revision: current.revision,
+          stations: current.stations
+        });
+      } else if (error?.code === "STATE_TOO_LARGE") {
+        stateErrorResponse(res, method, 413, "state_too_large", "共享状态不能超过 20 MiB");
+      } else if (error?.code === "INVALID_STATE") {
+        stateErrorResponse(res, method, 400, "invalid_state", "共享状态格式不合法");
+      } else if (error?.code === "BODY_TOO_LARGE") {
+        stateErrorResponse(res, method, 413, "body_too_large", "请求体不能超过 20 MiB");
+      } else if (error?.code === "INVALID_JSON") {
+        stateErrorResponse(res, method, 400, "invalid_json", "请求体必须是合法 JSON");
+      } else {
+        console.error(`共享状态写入失败：${error instanceof Error ? error.message : String(error)}`);
+        stateErrorResponse(res, method, 500, "state_write_failed", "共享状态写入失败");
+      }
+    }
+    return true;
+  }
+  return false;
 }
 
 function isWithin(root, target) {
@@ -425,7 +589,7 @@ async function handleProxy(req, res, requestUrl) {
   req.pipe(bodyLimit).pipe(upstream);
 }
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   const method = req.method || "GET";
   if (!req.url) {
     sendText(res, method, 400, "Bad Request");
@@ -447,6 +611,13 @@ const server = http.createServer((req, res) => {
       return;
     }
     sendProxyHealth(res, method);
+    return;
+  }
+  try {
+    if (await handleSharedStateRoute(req, res, pathname)) return;
+  } catch (error) {
+    console.error(`共享接口内部错误：${error instanceof Error ? error.message : String(error)}`);
+    stateErrorResponse(res, method, 500, "shared_state_internal_error", "共享接口内部错误，请稍后重试");
     return;
   }
   if (pathname === PROXY_PATH) {

@@ -23,9 +23,27 @@ const DEFAULT_SETTINGS = Object.freeze({ view:"list", theme:"system", proxy:"", 
 const LOCAL_PROXY_PATH = "/api/proxy";
 const LOCAL_PROXY_HEALTH_PATH = "/api/proxy/health";
 const LOCAL_PROXY_RECHECK_MS = 15000;
+const REMOTE_SESSION_PATH = "/api/auth/session";
+const REMOTE_LOGIN_PATH = "/api/auth/login";
+const REMOTE_LOGOUT_PATH = "/api/auth/logout";
+const REMOTE_STATE_PATH = "/api/state";
+const REMOTE_META_PATH = "/api/state/meta";
+const REMOTE_SAVE_DEBOUNCE_MS = 250;
 let localProxySupport = null;
 let localProxyProbe = null;
 let localProxyLastCheckedAt = 0;
+let remoteMode = false;
+let remoteRevision = 0;
+let remoteCsrfToken = "";
+let remoteInitialStations = null;
+let remoteSaveQueue = Promise.resolve();
+let remoteSaveTimer = null;
+let remoteSaveActive = 0;
+let remoteSavePending = false;
+let remoteAuthSubmit = null;
+let remoteConflictState = null;
+let remoteConflictLocalStations = null;
+let remoteLastError = null;
 // connectivity 的「reachable」表示已通过无凭据的跨域探测确认服务可达，
 // 但浏览器无法读取带 Authorization 的响应（典型是未配置 CORS 的 OpenAI 网关）。
 // 它与 online 分开，避免把“网络可达”误报成“API Key 已验证”。
@@ -262,13 +280,17 @@ function normalizeStations(list){
 // 加载本地数据；没有存储项或解析失败时保持空列表，不植入任何站点。
 function load(){
   try{
-    const raw = readStored(LS_STATIONS);
-    // 首次运行和用户主动删空都展示空状态，避免把任何具体站点写死在程序里。
-    if(raw === null) stations = [];
-    else {
-      const arr = JSON.parse(raw);
-      if(!Array.isArray(arr)) throw new Error("stations 不是数组");
-      stations = normalizeStations(arr);
+    if(remoteMode && Array.isArray(remoteInitialStations)){
+      stations = normalizeStations(remoteInitialStations);
+    }else{
+      const raw = readStored(LS_STATIONS);
+      // 首次运行和用户主动删空都展示空状态，避免把任何具体站点写死在程序里。
+      if(raw === null) stations = [];
+      else {
+        const arr = JSON.parse(raw);
+        if(!Array.isArray(arr)) throw new Error("stations 不是数组");
+        stations = normalizeStations(arr);
+      }
     }
   }catch(e){
     // 不回写损坏原值，避免一次读取异常就覆盖用户尚可恢复的本地数据。
@@ -404,9 +426,235 @@ function writeStoredMany(entries){
   }
   Object.entries(entries).forEach(([key,value])=>store.setItem(key,value));
 }
+function writeLocalOnly(entries){
+  const localEntries = remoteMode ? Object.fromEntries(Object.entries(entries).filter(([key])=>key!==LS_STATIONS)) : entries;
+  if(Object.keys(localEntries).length) writeStoredMany(localEntries);
+}
+function showAuthGate(message=""){
+  const gate=document.getElementById("authGate");
+  const error=document.getElementById("authError");
+  if(!gate) return;
+  gate.hidden=false;
+  if(error) error.textContent=message;
+  const input=document.getElementById("authPassword");
+  if(input && document.activeElement!==input) setTimeout(()=>input.focus(),0);
+}
+function hideAuthGate(){
+  const gate=document.getElementById("authGate");
+  if(gate) gate.hidden=true;
+  const input=document.getElementById("authPassword");
+  if(input) input.value="";
+}
+function setupAuthGate(){
+  const form=document.getElementById("authForm");
+  if(!form) return;
+  form.addEventListener("submit",event=>{
+    event.preventDefault();
+    const input=document.getElementById("authPassword");
+    const password=input ? input.value : "";
+    if(remoteAuthSubmit) remoteAuthSubmit(password);
+  });
+}
+function remoteJson(response){
+  return response.text().then(text=>{
+    try{return text ? JSON.parse(text) : {};}catch(_){return {};}
+  });
+}
+async function remoteFetch(path, options={}){
+  const headers={ ...(options.headers || {}) };
+  if(remoteCsrfToken && options.method && options.method !== "GET" && options.method !== "HEAD"){
+    headers["X-AIHub-CSRF"]=remoteCsrfToken;
+  }
+  return fetch(path, { ...options, headers, credentials:"same-origin", cache:"no-store" });
+}
+function updateRemoteSavePending(){
+  remoteSavePending=!!remoteSaveTimer || remoteSaveActive>0;
+}
+async function loginRemote(){
+  showAuthGate();
+  while(true){
+    const password=await new Promise(resolve=>{ remoteAuthSubmit=resolve; });
+    remoteAuthSubmit=null;
+    const response=await fetch(REMOTE_LOGIN_PATH,{
+      method:"POST",
+      headers:{"content-type":"application/json"},
+      credentials:"same-origin",
+      cache:"no-store",
+      body:JSON.stringify({ password })
+    });
+    const body=await remoteJson(response);
+    if(response.ok && body.authenticated && typeof body.csrfToken==="string"){
+      remoteCsrfToken=body.csrfToken;
+      hideAuthGate();
+      return;
+    }
+    showAuthGate(body.error && body.error.message ? body.error.message : (response.status===429 ? "登录尝试过多，请稍后重试" : "登录失败，请检查密码"));
+    await new Promise(resolve=>setTimeout(resolve,200));
+  }
+}
+async function bootstrapRemoteState(){
+  const sessionResponse=await fetch(REMOTE_SESSION_PATH,{credentials:"same-origin",cache:"no-store"});
+  if(sessionResponse.status===404) return false;
+  if(!sessionResponse.ok) throw new Error("共享模式启动失败："+sessionResponse.status);
+  remoteMode=true;
+  const session=await remoteJson(sessionResponse);
+  if(!session.authenticated) await loginRemote();
+  else remoteCsrfToken=typeof session.csrfToken==="string" ? session.csrfToken : "";
+  const stateResponse=await remoteFetch(REMOTE_STATE_PATH);
+  if(!stateResponse.ok){
+    const body=await remoteJson(stateResponse);
+    throw new Error(body.error && body.error.message ? body.error.message : "读取 NAS 配置失败");
+  }
+  const state=await remoteJson(stateResponse);
+  if(!Number.isSafeInteger(Number(state.revision)) || !Array.isArray(state.stations)) throw new Error("NAS 配置格式不合法");
+  remoteRevision=Number(state.revision);
+  remoteInitialStations=normalizeStations(state.stations);
+  if(remoteInitialStations.length===0){
+    const localRaw=window.localStorage.getItem(LS_STATIONS);
+    if(localRaw){
+      try{
+        const localStations=normalizeStations(JSON.parse(localRaw));
+        if(localStations.length && window.confirm("NAS 里还没有站点，是否把本机已有站点导入 NAS？")){
+          const result=await persistRemoteStations("首次迁移",localStations);
+          remoteInitialStations=normalizeStations(result.stations);
+          remoteRevision=result.revision;
+        }
+      }catch(_){ /* 损坏的本机缓存不阻断 NAS 启动 */ }
+    }
+  }
+  return true;
+}
+async function persistRemoteStations(reason="保存", stationsValue=stations){
+  if(!remoteMode) return { revision:remoteRevision, stations:stationsValue };
+  if(remoteSaveTimer){ clearTimeout(remoteSaveTimer); remoteSaveTimer=null; }
+  const snapshot=JSON.stringify(normalizeStations(stationsValue));
+  const operation=remoteSaveQueue.then(async()=>{
+    let response=await remoteFetch(REMOTE_STATE_PATH,{
+      method:"PUT",
+      headers:{"content-type":"application/json"},
+      body:JSON.stringify({ revision:remoteRevision, stations:JSON.parse(snapshot) })
+    });
+    if(response.status===401){
+      await loginRemote();
+      response=await remoteFetch(REMOTE_STATE_PATH,{
+        method:"PUT",
+        headers:{"content-type":"application/json"},
+        body:JSON.stringify({ revision:remoteRevision, stations:JSON.parse(snapshot) })
+      });
+    }
+    const body=await remoteJson(response);
+    if(response.status===409){
+      const error=new Error("NAS 配置已被其他设备更新");
+      error.code="REMOTE_CONFLICT";
+      error.remoteState=body;
+      throw error;
+    }
+    if(!response.ok) throw new Error(body.error && body.error.message ? body.error.message : `${reason}失败`);
+    remoteRevision=Number(body.revision);
+    remoteInitialStations=null;
+    remoteConflictLocalStations=null;
+    return { revision:remoteRevision, stations:JSON.parse(snapshot) };
+  });
+  remoteSaveActive+=1;
+  updateRemoteSavePending();
+  const tracked=operation.finally(()=>{
+    remoteSaveActive=Math.max(0,remoteSaveActive-1);
+    updateRemoteSavePending();
+  });
+  remoteSaveQueue=tracked.catch(()=>{});
+  return tracked;
+}
+async function persistStationsNow(reason="保存", stationsValue=stations){
+  if(!remoteMode) return save();
+  remoteLastError=null;
+  try{
+    await persistRemoteStations(reason, stationsValue);
+    return true;
+  }catch(error){
+    remoteLastError=error;
+    updateRemoteSavePending();
+    if(error.code==="REMOTE_CONFLICT"){
+      remoteConflictState=error.remoteState;
+      try{ remoteConflictLocalStations=normalizeStations(stationsValue); }catch(_){ remoteConflictLocalStations=null; }
+      openRemoteConflict(error.remoteState);
+    }
+    return false;
+  }
+}
+function scheduleRemoteStationsSave(reason="保存"){
+  if(!remoteMode || remoteSaveTimer) return;
+  remoteSaveTimer=setTimeout(()=>{
+    remoteSaveTimer=null;
+    updateRemoteSavePending();
+    persistRemoteStations(reason).catch(error=>{
+      updateRemoteSavePending();
+      if(error.code==="REMOTE_CONFLICT"){
+        try{ remoteConflictLocalStations=normalizeStations(stations); }catch(_){ remoteConflictLocalStations=null; }
+        openRemoteConflict(error.remoteState);
+      }
+      else toast(error.message || "NAS 配置保存失败","err");
+    });
+  },REMOTE_SAVE_DEBOUNCE_MS);
+  updateRemoteSavePending();
+}
+async function refreshRemoteRevision(){
+  if(!remoteMode || remoteSavePending) return;
+  const response=await remoteFetch(REMOTE_META_PATH);
+  if(response.status===401){ await loginRemote(); return; }
+  if(!response.ok) return;
+  const meta=await remoteJson(response);
+  if(Number(meta.revision)===remoteRevision) return;
+  const stateResponse=await remoteFetch(REMOTE_STATE_PATH);
+  if(!stateResponse.ok) return;
+  const state=await remoteJson(stateResponse);
+  if(!Array.isArray(state.stations)) return;
+  openRemoteConflict(state);
+}
+function openRemoteConflict(state){
+  if(!state || !Array.isArray(state.stations)) return;
+  remoteConflictState=state;
+  const message=document.getElementById("conflictMessage");
+  if(message) message.textContent=`另一台主机已保存第 ${Number(state.revision)||0} 版配置。当前页面的修改还没有覆盖 NAS。`;
+  showModal("conflictModal");
+}
+function reloadRemoteConflict(){
+  const state=remoteConflictState;
+  if(!state || !Array.isArray(state.stations)) return;
+  stations=normalizeStations(state.stations);
+  remoteRevision=Number(state.revision)||0;
+  remoteConflictState=null;
+  remoteConflictLocalStations=null;
+  selectedId=getById(selectedId) ? selectedId : (stations[0] ? stations[0].id : null);
+  focusId=null; focusReturnScroll=null; focusReturnStationId=null;
+  selectedModelsByStation=new Map();
+  selectedModels.clear();
+  restoreModelSelection(selectedId);
+  hideModal("conflictModal",{restoreFocus:false});
+  hideModal("formModal",{restoreFocus:false});
+  render();
+  toast("已使用 NAS 最新配置","ok");
+}
+async function overwriteRemoteConflict(){
+  if(!remoteConflictState) return;
+  const localStations=remoteConflictLocalStations ? normalizeStations(remoteConflictLocalStations) : normalizeStations(stations);
+  stations=localStations;
+  remoteRevision=Number(remoteConflictState.revision)||0;
+  const persisted=await persistStationsNow("强制覆盖", localStations);
+  if(!persisted){
+    toast(remoteLastError?.message || "强制覆盖失败","err");
+    return;
+  }
+  remoteConflictState=null;
+  remoteConflictLocalStations=null;
+  hideModal("conflictModal",{restoreFocus:false});
+  hideModal("formModal",{restoreFocus:false});
+  render();
+  toast("已覆盖 NAS 配置","ok");
+}
 function saveBundle(entries, warningKind="stations"){
   try{
-    writeStoredMany(entries);
+    writeLocalOnly(entries);
+    if(remoteMode && warningKind==="stations" && Object.prototype.hasOwnProperty.call(entries,LS_STATIONS)) scheduleRemoteStationsSave(warningKind);
     return true;
   }catch(e){
     console.warn("保存本地数据失败", e);
@@ -418,6 +666,7 @@ function saveBundle(entries, warningKind="stations"){
 
 // 持久化：仅写 stations / settings 两个 key
 function save(){
+  if(remoteMode){ scheduleRemoteStationsSave("stations"); return true; }
   return saveBundle({ [LS_STATIONS]:JSON.stringify(stations) }, "stations");
 }
 function saveSettings(){
@@ -3485,7 +3734,7 @@ function moveStationDrag(event){
   // 浏览器最多一帧计算一次落点；长列表拖动时不会因指针采样率而反复强制布局。
   queueStationDragDrop(drag);
 }
-function finishStationDrag(event, commit){
+async function finishStationDrag(event, commit){
   const drag=activeDrag;
   if(!drag || (event && "pointerId" in event && event.pointerId!==drag.pointerId)) return;
   if(commit && drag.moved && event) drag.pendingPoint={ x:event.clientX, y:event.clientY };
@@ -3500,7 +3749,7 @@ function finishStationDrag(event, commit){
   if(drag.moved) suppressStationOpenClickUntil=performance.now()+420;
   try{ if(drag.handle.hasPointerCapture(drag.pointerId)) drag.handle.releasePointerCapture(drag.pointerId); }catch(_){}
   renderAfterDrag=false;
-  if(latestDrop && reorder(drag.fromId,latestDrop.toId,latestDrop.after)){
+  if(latestDrop && await reorder(drag.fromId,latestDrop.toId,latestDrop.after)){
     renderWithStationFlip(()=>render({ preserveModelAnchors:false }));
     dragShifts.clear(); // 旧卡片已随重绘移除，只清引用，不再触碰样式
     toast("已调整顺序", "ok");
@@ -3538,7 +3787,7 @@ function renderWithStationFlip(renderFn){
     el.addEventListener("transitionend",()=>{ el.style.transition=""; },{once:true});
   });
 }
-function endStationDrag(event){ finishStationDrag(event,true); }
+function endStationDrag(event){ void finishStationDrag(event,true); }
 function cancelStationDrag(event){ finishStationDrag(event,false); }
 function attachDrag(scope){
   const root=document.querySelector(scope);
@@ -3558,7 +3807,7 @@ function attachDrag(scope){
   }
 }
 // 显式携带落点方向，删除原项后再定位目标项，杜绝复用上一轮拖拽方向。
-function reorder(fromId, toId, after){
+async function reorder(fromId, toId, after){
   if(isSearchFiltered()){ toast("请先清空搜索再调整顺序", "warn"); return false; }
   if(!fromId || !toId || fromId===toId) return false;
   byOrder();
@@ -3574,13 +3823,14 @@ function reorder(fromId, toId, after){
   const previousSnapshot=JSON.stringify(previous);
   stations=next;
   stations.forEach((station,index)=>{ station.order=index; });
-  if(!save()){
+  const persisted = remoteMode ? await persistStationsNow("排序") : save();
+  if(!persisted){
     // 拖拽排序属于结构性改动，写入失败时立即还原内存顺序，避免刷新前后看到两套结果。
     // 快照恢复会重建全部站点对象，必须走统一入口：直接把 JSON 塞回 stations 会让
     // 在途请求仍绑在旧对象上，模型卡的「测试中」标记也停在原地。
     restoreStationsFromSnapshot(previousSnapshot);
     byOrder();
-    toast("排序保存失败：本地存储不可用，本次调整已撤销","err");
+    toast(remoteLastError?.message || "排序保存失败：本地存储不可用，本次调整已撤销","err");
     return false;
   }
   return true;
@@ -4032,7 +4282,7 @@ function resetStationRuntime(st){
   st.status = { connectivity:"unknown", latency:null, balance:null, balanceKind:"balance", balanceUnlimited:false, balanceUnit:null, balanceSource:null, balanceNote:null, balanceRaw:null, balanceError:null, modelListError:null, modelListEmpty:false, lastTest:null, error:null, transport:null, authMode:"bearer" };
   st.models = [];
 }
-function saveForm(){
+async function saveForm(){
   const name = text(document.getElementById("f_name").value,120);
   const rawBaseurl = document.getElementById("f_baseurl").value;
   const baseurl = normalizeBaseUrl(rawBaseurl);
@@ -4088,7 +4338,7 @@ function saveForm(){
       st.status.balance=null; st.status.balanceKind="balance"; st.status.balanceUnlimited=false;
       st.status.balanceUnit=null; st.status.balanceSource=null; st.status.balanceNote=null; st.status.balanceRaw=null; st.status.balanceError=null;
     }
-    persisted=save();
+    persisted=await persistStationsNow("保存站点");
     if(!persisted){
       // 还原单站字段；已失效的旧请求不会重新生效，下面按需清理遗留的 testing 标记。
       Object.assign(st, JSON.parse(stationSnapshot));
@@ -4099,7 +4349,7 @@ function saveForm(){
         invalidateStation(st.id);
         if(displaySnapshot) modelDisplaySnapshots.set(st.id,displaySnapshot);
       }
-      toast("保存失败：本地存储不可用（已满、只读或被禁用），请先导出备份再清理空间","err");
+      toast(remoteLastError?.message || "保存失败：本地存储不可用（已满、只读或被禁用），请先导出备份再清理空间","err");
       return;   // 不关弹窗、不渲染，让用户看到错误并决定如何处理
     }
     toast("已保存修改","ok");
@@ -4107,10 +4357,10 @@ function saveForm(){
     const stationsSnapshot=JSON.stringify(stations);
     const maxOrder = stations.reduce((m,s)=>Math.max(m, s.order), -1);
     stations.push(normalizeStation({ id:uid(), name, baseurl, apikey, group, note, balancePath, headers:customHeaders, order:maxOrder+1 }));
-    persisted=save();
+    persisted=await persistStationsNow("添加站点");
     if(!persisted){
       restoreStationsFromSnapshot(stationsSnapshot);   // 弹出刚 push 的站点，内存与磁盘保持一致
-      toast("保存失败：本地存储不可用（已满、只读或被禁用），请先导出备份再清理空间","err");
+      toast(remoteLastError?.message || "保存失败：本地存储不可用（已满、只读或被禁用），请先导出备份再清理空间","err");
       return;
     }
     toast("已添加「"+name+"」","ok");
@@ -4127,7 +4377,7 @@ function openDelete(id){
   document.getElementById("delName").textContent = st.name;
   showModal("delModal");
 }
-function doDelete(){
+async function doDelete(){
   const st = getById(deletingId); if(!st) return;
   const scrollState=focusId===deletingId ? (focusReturnScroll || captureScrollState()) : captureScrollState();
   // 删除是结构性变更，持久化失败需整体还原，否则刷新后“已删除”的站点又回来了却无人提示。
@@ -4160,7 +4410,8 @@ function doDelete(){
     [LS_UI_STATE]:serializeUIState(),
     [LS_STATIONS]:JSON.stringify(stations)
   }, "stations");
-  if(!persisted){
+  const remotePersisted=remoteMode ? await persistStationsNow("删除站点") : persisted;
+  if(!remotePersisted){
     // 还原全部结构性状态，保持删除弹窗打开以便用户处理存储问题后再试。
     restoreStationsFromSnapshot(stationsSnapshot);
     selectedId=prevSelectedId; focusId=prevFocusId; focusReturnScroll=prevFocusReturnScroll; focusReturnStationId=prevFocusReturnStationId;
@@ -4173,7 +4424,7 @@ function doDelete(){
     // 尽力把回滚后的内存状态补偿写回，避免只成功写入其中一个键。
     saveBundle({ [LS_STATIONS]:stationsSnapshot, [LS_UI_STATE]:uiStateSnapshot }, "stations");
     render({ scrollState });
-    toast("删除失败：本地存储不可用（已满、只读或被禁用），请先导出备份再清理空间","err");
+    toast(remoteLastError?.message || "删除失败：本地存储不可用（已满、只读或被禁用），请先导出备份再清理空间","err");
     return;
   }
   deletingId=null;
@@ -4220,7 +4471,7 @@ function importJSON(file){
   if(!file) return;
   if(file.size > 5 * 1024 * 1024){ toast("导入文件不能超过 5 MB","warn"); return; }
   const reader = new FileReader();
-  reader.onload = ()=>{
+  reader.onload = async ()=>{
     try{
       const data = JSON.parse(reader.result);
       // 只接受本项目明确导出的对象格式；兼容早期 AIHubPanel 的“stations”对象，
@@ -4305,7 +4556,8 @@ function importJSON(file){
         [LS_SETTINGS]:JSON.stringify(settings),
         [LS_UI_STATE]:serializeUIState()
       }, "stations");
-      if(!persisted){
+      const remotePersisted=remoteMode ? await persistStationsNow("导入站点") : persisted;
+      if(!remotePersisted){
         // 还原导入前的全部状态并抛错走统一 catch，确保给出明确失败提示。
         restoreStationsFromSnapshot(prevStationsSnapshot);
         settings=normalizeSettings(JSON.parse(prevSettingsSnapshot));
@@ -4321,7 +4573,7 @@ function importJSON(file){
           [LS_UI_STATE]:prevUIStateSnapshot
         }, "stations");
         applyTheme(); updateThemeBtn(); render();
-        throw new Error("本地存储不可用（已满、只读或被禁用），导入已回滚，请先清理空间再重试");
+        throw new Error(remoteLastError?.message || "本地存储不可用（已满、只读或被禁用），导入已回滚，请先清理空间再重试");
       }
       // 备份可能带着不同的主题设置，导入成功后必须像设置保存一样立即应用，
       // 否则界面会沿用旧主题直到用户手动切换或重新加载。
@@ -4361,7 +4613,7 @@ function openSettings(){
   document.getElementById("s_view").value = settings.view;
   showModal("setModal");
 }
-function saveSettingsModal(){
+async function saveSettingsModal(){
   const settingsSnapshot=JSON.stringify(settings);
   const stationsSnapshot=JSON.stringify(stations);
   const previousDisplaySnapshots=new Map();
@@ -4381,12 +4633,19 @@ function saveSettingsModal(){
     longContextKB: document.getElementById("s_longcontext").value,
     view: document.getElementById("s_view").value
   });
-  const persisted=saveBundle({
-    [LS_STATIONS]:JSON.stringify(stations),
-    [LS_SETTINGS]:JSON.stringify(settings)
-  }, "settings");
+  const proxyChanged=previousProxy !== settings.proxy;
+  let persisted;
+  if(remoteMode){
+    remoteLastError=null;
+    persisted=saveBundle({ [LS_SETTINGS]:JSON.stringify(settings) }, "settings");
+    if(persisted && proxyChanged) persisted=await persistStationsNow("保存设置");
+  }else{
+    persisted=saveBundle({
+      [LS_STATIONS]:JSON.stringify(stations),
+      [LS_SETTINGS]:JSON.stringify(settings)
+    }, "settings");
+  }
   if(!persisted){
-    const proxyChanged=previousProxy !== settings.proxy;
     settings=normalizeSettings(JSON.parse(settingsSnapshot));
     restoreStationsFromSnapshot(stationsSnapshot);
     if(proxyChanged){
@@ -4397,7 +4656,7 @@ function saveSettingsModal(){
     // 尽力把已经成功写入的一侧补回旧值。
     saveBundle({ [LS_STATIONS]:stationsSnapshot, [LS_SETTINGS]:settingsSnapshot }, "settings");
     applyTheme(); updateThemeBtn(); render();
-    toast("设置保存失败：本地存储不可用（已满、只读或被禁用），请先导出备份再清理空间","err");
+    toast(remoteLastError?.message || "设置保存失败：本地存储不可用（已满、只读或被禁用），请先导出备份再清理空间","err");
     return;
   }
   render(); hideModal("setModal");
@@ -4632,6 +4891,9 @@ function bindGlobal(){
   document.getElementById("fileInput").onchange = (e)=>{ if(e.target.files[0]) importJSON(e.target.files[0]); e.target.value=""; };
   document.getElementById("btnSettings").onclick = openSettings;
   document.getElementById("setSave").onclick = saveSettingsModal;
+  document.getElementById("conflictExport").onclick = ()=>{ exportJSON(); hideModal("conflictModal"); };
+  document.getElementById("conflictReload").onclick = reloadRemoteConflict;
+  document.getElementById("conflictOverwrite").onclick = ()=>{ void overwriteRemoteConflict(); };
   document.getElementById("stationForm").addEventListener("submit", e=>{ e.preventDefault(); saveForm(); });
   document.getElementById("delBtn").onclick = doDelete;
   document.getElementById("btnTheme").onclick = cycleTheme;
@@ -4703,13 +4965,29 @@ function bindGlobal(){
 }
 
 /* ---------------- 启动 ---------------- */
-load();
-// 首次打开默认选第一站；若 UI 状态中仍有有效站点，则保持用户上次选择。
-selectedId = getById(selectedId) ? selectedId : (stations.length ? stations[0].id : null);
-restoreModelSelection(selectedId);
-// 首次加载只读取配置，不重复回写完整配置；用户实际改变选择/视图时再保存。
-applyTheme();
-updateThemeBtn();
-bindGlobal();
-render();
-syncDetailOffset();
+async function startApp(){
+  setupAuthGate();
+  try{
+    await bootstrapRemoteState();
+  }catch(error){
+    console.error("共享模式启动失败", error);
+    showAuthGate(error && error.message ? error.message : "共享模式启动失败，请检查服务");
+    return;
+  }
+  load();
+  // 首次打开默认选第一站；若 UI 状态中仍有有效站点，则保持用户上次选择。
+  selectedId = getById(selectedId) ? selectedId : (stations.length ? stations[0].id : null);
+  restoreModelSelection(selectedId);
+  // 首次加载只读取配置，不重复回写完整配置；用户实际改变选择/视图时再保存。
+  applyTheme();
+  updateThemeBtn();
+  bindGlobal();
+  render();
+  syncDetailOffset();
+  remoteInitialStations=null;
+  if(remoteMode){
+    document.addEventListener("visibilitychange", ()=>{ if(!document.hidden) refreshRemoteRevision(); });
+    window.addEventListener("focus", refreshRemoteRevision);
+  }
+}
+void startApp();

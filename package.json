@@ -7,7 +7,8 @@
   "main": "electron/main.js",
   "scripts": {
     "check": "node scripts/regression.mjs",
-    "test": "npm run check && npm run test:layout && npm run test:perf && npm run test:storage && npm run test:startup",
+    "test": "npm run check && npm run test:shared && npm run test:layout && npm run test:perf && npm run test:storage && npm run test:startup",
+    "test:shared": "node scripts/shared-state-regression.mjs",
     "test:layout": "electron scripts/layout-regression.cjs",
     "test:perf": "electron scripts/perf-regression.cjs",
     "test:storage": "electron scripts/storage-regression.cjs",
@@ -32,10 +33,12 @@
       "electron/preload.js",
       "electron/icon.png",
       "server.mjs",
+      "server/**/*",
       "public/**/*"
     ],
     "asarUnpack": [
       "server.mjs",
+      "server/**/*",
       "public/**/*"
     ],
     "electronDist": "node_modules/electron/dist",

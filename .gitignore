@@ -19,6 +19,8 @@ config.json
 apikey.json
 .aihubpanel-data/
 *.json.tmp
+data/
+.env
 
 # 根目录交付件（打包副本，便于直接双击使用）
 /AIHubPanel-*.exe

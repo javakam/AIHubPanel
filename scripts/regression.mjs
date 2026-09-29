@@ -9,13 +9,16 @@ const NODE_BIN = process.execPath;
 const CHECK_FILES = [
   "public/app.js",
   "server.mjs",
+  "server/auth.mjs",
+  "server/state-store.mjs",
   "electron/main.js",
   "electron/preload.js",
   "scripts/clean-release.mjs",
   "scripts/layout-regression.cjs",
   "scripts/perf-regression.cjs",
   "scripts/storage-regression.cjs",
-  "scripts/startup-regression.cjs"
+  "scripts/startup-regression.cjs",
+  "scripts/shared-state-regression.mjs"
 ];
 
 // 子进程卡住（git 等锁、node --check 被杀软拦住）不能让 npm test 一直挂着。
@@ -139,7 +142,7 @@ async function runSyntaxChecks() {
   for (const file of CHECK_FILES) {
     await run(NODE_BIN, ["--check", file]);
   }
-  await run("git", ["diff", "--check", "--", "public/app.js", "public/app.css", "server.mjs", "electron/main.js", "electron/preload.js", "package.json", "scripts/regression.mjs", "scripts/layout-regression.cjs", "scripts/perf-regression.cjs", "scripts/storage-regression.cjs", "scripts/startup-regression.cjs"]);
+  await run("git", ["diff", "--check", "--", "public/app.js", "public/app.css", "server.mjs", "server/auth.mjs", "server/state-store.mjs", "electron/main.js", "electron/preload.js", "package.json", "scripts/regression.mjs", "scripts/shared-state-regression.mjs", "scripts/layout-regression.cjs", "scripts/perf-regression.cjs", "scripts/storage-regression.cjs", "scripts/startup-regression.cjs"]);
 }
 
 function runReleaseAndDefaultChecks() {
@@ -159,6 +162,15 @@ function runReleaseAndDefaultChecks() {
     for (const value of forbidden) {
       if (content.includes(value)) throw new Error(`${file} contains forbidden hard-coded default: ${value}`);
     }
+  }
+  const appSource = fs.readFileSync(path.join(ROOT, "public/app.js"), "utf8");
+  if (!/async function saveSettingsModal\(\)/.test(appSource) ||
+      !/await persistStationsNow\("保存设置"/.test(appSource)) {
+    throw new Error("shared settings changes must await NAS station persistence");
+  }
+  if (!/async function reorder\(/.test(appSource) ||
+      !/await reorder\(drag\.fromId,latestDrop\.toId,latestDrop\.after\)/.test(appSource)) {
+    throw new Error("station reorder must await NAS persistence before reporting success");
   }
 }
 

@@ -33,6 +33,29 @@ node server.mjs
 
 > 如果只把 `public/` 当静态文件托管，面板本身也能用，直连支持 CORS 的站点没问题；启动 `server.mjs` 主要是为了在 CORS 失败时自动接管转发。
 
+## 飞牛 NAS Docker 版
+
+Docker 版适合把面板部署在飞牛 NAS 上，让家里和公司的多台主机访问同一套站点配置。它使用一个 Node 容器，不安装 npm 依赖，不包含 Electron；站点、API Key、模型列表和测试结果保存在容器挂载的 `data/` 目录，主题、视图、代理和选择状态仍保存在各自浏览器。
+
+部署时请使用一个固定访问地址。优先通过 Tailscale / WireGuard 等私网访问，或者通过飞牛 NAS 的 HTTPS 反向代理访问；不要把容器端口直接暴露到公网。Compose 默认把端口绑定到 NAS 的所有网卡，便于三台主机通过 NAS 地址访问；只使用 NAS 反向代理时，可在 `.env` 中把 `AI_HUB_BIND` 改为 `127.0.0.1`。
+
+首次部署前，在项目目录准备未纳入 Git 的 `.env`，填写准确的 `AI_HUB_ALLOWED_ORIGIN`、面板登录密码和随机的 `AI_HUB_SESSION_SECRET`。直接用 HTTP 访问 NAS 时保持 `AI_HUB_COOKIE_SECURE=0`；使用 HTTPS 反向代理时改为 `1`。然后执行 `docker compose up -d --build`。
+
+`.env` 示例（只放在 NAS，不要提交到 Git）：
+
+```dotenv
+AI_HUB_ALLOWED_ORIGIN=http://aihub-nas.example:4179
+AI_HUB_ADMIN_PASSWORD=请替换成面板密码
+AI_HUB_SESSION_SECRET=请替换成至少16个字符的随机字符串
+AI_HUB_COOKIE_SECURE=0
+```
+
+直接通过 NAS 地址访问时，把 `AI_HUB_ALLOWED_ORIGIN` 写成浏览器地址栏中的完整来源，例如 `http://192.168.1.20:4179`；通过 HTTPS 反向代理访问时写成 `https://aihub.example.com`，并把 `AI_HUB_COOKIE_SECURE` 改为 `1`。三台主机必须使用同一个固定来源，不要一台用 IP、另一台用不同域名。
+
+在飞牛 Docker 管理器中构建并启动后，检查容器健康状态和 `http://NAS地址:4179/`。升级时执行 `docker compose up -d --build`，不要删除 `data/`；这个目录里的 `state.json` 和 `state.json.bak` 是共享配置及恢复备份。建议在升级前复制一份 `data/` 到 NAS 的备份目录。
+
+容器只需要持久化 `data/`。升级镜像前备份这个目录；容器重建不会影响里面的共享配置。三台主机同时修改时，面板按版本号拒绝旧数据覆盖，并提示重新加载或导出本机数据。
+
 ## 功能
 
 - **站点管理**：多个中转站集中管理，支持分组、搜索、拖拽排序。快速导入能直接粘贴 NewAPI 的连接导出文本，自动识别 Base URL 和 Key。

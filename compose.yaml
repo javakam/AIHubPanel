@@ -1,0 +1,30 @@
+services:
+  aihubpanel:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aihubpanel:local
+    container_name: aihubpanel
+    restart: unless-stopped
+    init: true
+    mem_limit: 512m
+    ports:
+      - "${AI_HUB_BIND:-0.0.0.0}:4179:4179"
+    environment:
+      AI_HUB_SHARED_STATE: "1"
+      AI_HUB_HOST: "0.0.0.0"
+      AI_HUB_PORT: "4179"
+      AI_HUB_DATA_DIR: "/data"
+      AI_HUB_ALLOWED_ORIGIN: "${AI_HUB_ALLOWED_ORIGIN:?set the exact browser origin}"
+      AI_HUB_ADMIN_PASSWORD: "${AI_HUB_ADMIN_PASSWORD:?set the panel password}"
+      AI_HUB_SESSION_SECRET: "${AI_HUB_SESSION_SECRET:?set a random session secret}"
+      AI_HUB_COOKIE_SECURE: "${AI_HUB_COOKIE_SECURE:-0}"
+    volumes:
+      - ./data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true

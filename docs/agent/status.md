@@ -1,9 +1,14 @@
 # AIHubPanel 当前状态
 
 ## 正在做什么
-本轮「全量审计 + 体积优化」已收尾。体积结论：仓库 574MB 里 463MB 是 devDependency、107MB 是发布目录（含 101MB 的 exe），源码只占 352KB，所以源码侧无可优化空间；exe 瘦身做过两次实测（单加压缩无效，删 7 个 Electron 运行时文件省 9% 但拿掉软件渲染与系统 ffmpeg），收益小于风险，未采纳。代码侧做了真正的死代码清理（39 删 4 增），并从清理后的源码重新打包（sha256 `c649abaf…de1a`，101224172 字节），五套回归在清理后的代码与打包态上全部通过。等用户拍板：是否给 exe 瘦身、是否给 1.2.0 打 tag 推远端（本次均未做）。
+本轮「飞牛 NAS Docker 共享状态改造」已完成源码、浏览器和本机回归审计，并修复了主状态文件结构损坏时未尝试 `.bak`、共享模式设置不提交站点状态、拖拽排序未等待 NAS 保存三个缺口。采用单容器、无运行时依赖、`/data/state.json` 持久化、登录和版本冲突保护的方案；Electron 桌面版和未开启共享模式的浏览器版保持原行为。Docker CLI 不在本机，镜像构建、飞牛挂载权限和 NAS 重启验收尚未在真实 Docker 环境执行，不能标记为已验证。
 
 ## 最近完成（近三日）
+- **2026-09-18**：完成飞牛 NAS Docker 共享状态改造。新增 `server/auth.mjs`、`server/state-store.mjs`、`scripts/shared-state-regression.mjs`、`Dockerfile`、`compose.yaml` 和 `.dockerignore`；服务端增加 HttpOnly 会话、CSRF、失败限流、原子状态写入、`.bak` 恢复和版本冲突；前端在共享模式下把站点、API Key、模型列表和测试结果放到 NAS，浏览器只保留界面状态。
+- **2026-09-18**：修复共享状态收尾问题：首次本机配置迁移返回空站点、保存失败后待保存标记残留、会话过期保存不重试、冲突重新加载仍保留旧表单、强制覆盖丢失冲突前本机修改；同时补上共享模式错误配置快速失败、密码长度限制、Docker 默认 NAS 直连和 Node 堆上限。
+- **2026-09-18**：本机验证 `npm test` 全部通过；共享模式浏览器实测登录、添加站点、服务重启恢复、双页面冲突、重新加载、强制覆盖和控制台错误检查通过。最终性能回归重复视图操作 3695.6ms，renderer 工作集增量 -2.5MiB，DOM 7113。
+- **2026-09-19**：继续审计共享状态恢复链路，复现并修复 `state.json` 为合法 JSON 但结构损坏时不读取 `state.json.bak` 的问题；新增共享回归用例。修复后完整 `npm test` 通过：性能重复视图 3038.8ms、renderer 工作集增量 -3.3MiB、DOM 7113。静态 Docker 安全检查通过，但本机没有 Docker 工具，真实容器和 NAS 验收仍未完成。
+- **2026-09-19**：继续审计共享模式保存链路，修复设置中的代理变化未把重置后的站点状态提交到 NAS、拖拽排序未等待远程保存的问题；新增基础回归断言。修复后完整 `npm test` 再次通过：性能重复视图 3855.5ms、renderer 工作集增量 -2.7MiB、DOM 7113。
 - **2026-09-13**：体积审计与瘦身实测（本轮）。先拆体积：仓库 574MB = `node_modules` 463MB（devDependency，不随产物分发）+ `electron/release` 107MB（exe 101MB + 用户数据）+ 源码 352KB，确认「太大」只可能指前两项。两次受控构建验证 exe 能不能小：只加 `--config.compression=maximum` 产出 101224169 字节，与默认压缩的 101221724 字节无差别（包内主体已是压缩格式）；再加 afterPack 删 7 个 Electron 运行时文件（dxcompiler.dll 24.6MB、dxil.dll 1.4MB、vk_swiftshader.dll 5.3MB、vk_swiftshader_icd.json、vulkan-1.dll 0.9MB、LICENSES.chromium.html 19.5MB、ffmpeg.dll 3.0MB）产出 92051519 字节（−9%），打包态启动回归 EXIT=0 能到首帧，但代价是失去无 GPU 时的软件渲染回退和系统 ffmpeg，属未在真实机器验证的运行时改动，未采纳。结论与数据已写入 reference.md「体积构成与瘦身实测」。
 - **2026-09-13**：死代码清理并重新打包。逐条自己 grep 复核后共 39 删 4 增：清掉详情页已废弃的整套 `overview-*` 样式及配套的 `.col-right`、`.kbd`、`overview-grid + .sec` 规则，清掉无引用的 `MODEL_STATES` 常量，清掉 `main#app` 和 `#formSave` 两个死 id。app.css 81163→77975 字节（980→946 行，括号 694/694 平衡），app.js 260694→260632 字节（4716→4715 行），index.html 15831→15808 字节。清理后布局回归与基础回归通过，并从清理后的源码重新打包：`electron/release/AIHubPanel-1.2.0.exe`（101224172 字节，sha256 `c649abaf…de1a`），打包态启动回归中位数 5551ms（browserWindowCreate 41ms、serverStartup 40ms、pageToReady 371ms、domToReady 22ms），性能回归 renderer 增量 −3MiB、存储回归均退出码 0。打包前备份、打包后逐字节还原了用户真实 `config.json`/`apikey.json`。
 - **2026-09-13**：文档行号纠偏。一次清理让 `public/app.js` 行号整体前移，逐条核实后发现文档里一批 `文件:行号` 已指向错误内容（例如 `app.js:1308` 实际是 `try{`、`main.js:180` 实际是 `did-finish-load`），全部按真实符号定义重钉；同时修掉一处自查发现的重复条目。
@@ -53,6 +58,11 @@
 - [ ] 基础回归的语法检查只覆盖仓库内的 JS/MJS/CJS，不含 `public/index.html` 的内联部分；如需覆盖要另加 HTML 校验。
 - [ ] 决定 exe 是否继续瘦身：删 7 个 Electron 运行时文件可省 9%（101221724→92051519 字节），代价是失去无 GPU 软件渲染回退与系统 ffmpeg。本轮实测能启动但未在真实机器验证，默认不采纳。
 - [ ] 根目录 `config.json`（非打包态 `npm start` 写入，已 gitignore）里存有 2 个明文 `sk-` Key，本轮未改动；`apikey.json` 拆分只覆盖桌面版 exe 的存储路径，是否要把 `npm start` 也切到分离存储需用户决定。
+- [x] 完成飞牛 NAS Docker 共享状态改造：单容器、无运行时 npm 依赖、`/data` 持久化、登录、CSRF、限流、原子写入、备份恢复和版本冲突。
+- [x] 完成共享模式浏览器审计：登录、添加、重启恢复、双页面冲突、重新加载、强制覆盖和控制台错误。
+- [ ] 在飞牛 NAS 或有 Docker Daemon 的主机上执行镜像构建、健康检查、`/data` 写权限、容器重启恢复和反向代理 HTTPS 验收。
+- [x] 复核共享状态备份恢复边界：主文件语法损坏和结构损坏都覆盖回归，恢复失败时不返回敏感路径信息。
+- [x] 复核共享模式结构性保存：设置代理变化和拖拽排序都会等待 NAS 写入，失败或冲突会回滚并提示。
 
 ## 已知问题（长期）
 - portable 单文件 exe 启动会包含自解压耗时；1.2.0 打包态实测总耗时中位数 5326ms（清理后重新打包的同版本产物为 5551ms；同法 1.1.1 为 5635ms、1.1.0 约 8.0 秒，差异主要来自机器负载），应用自身页面到首帧约 0.33-0.37 秒
@@ -60,12 +70,14 @@
 - `config.json` 和 `apikey.json` 已 gitignore，前者不含 API Key，后者单独保存 API Key，两个文件都绝不提交
 - 桌面版和浏览器版数据互不同步，靠导出/导入迁移
 - `npm run test:perf` 使用合成数据和离屏 Electron 窗口，能发现前端渲染/内存退化，但不替代真实上游网络、长时间批量测试和不同机器的运行验证。
+- Docker 镜像本机未构建：当前环境没有 `docker` 命令；飞牛 NAS 上首次启动要重点确认宿主机 `data/` 目录允许容器内 `node` 用户写入。
 
 ## 关键路径（只读）
 - 启动入口：electron/main.js → startServer() → import server.mjs
 - 前端入口：public/app.js → IIFE 末尾 init
 - 存储：桌面版 electron/preload.js → configDir()/config.json + apikey.json；运行数据 → configDir()/.aihubpanel-data；浏览器版 localStorage
 - 打包：npm run dist，产物在 electron/release/（gitignore）
+- NAS 部署：`compose.yaml` 构建 Node 运行时镜像；共享状态在 `/data/state.json`，备份在 `/data/state.json.bak`
 
 ## 备注
 - portable exe 的 configDir() 取启动器提供的实际 exe 目录，不使用临时解压目录；首次运行不植入任何预置站点

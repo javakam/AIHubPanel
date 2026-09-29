@@ -9,6 +9,17 @@
 <link rel="stylesheet" href="app.css" />
 </head>
 <body>
+  <div class="auth-gate" id="authGate" hidden>
+    <form class="auth-panel" id="authForm">
+      <div class="auth-mark">AI</div>
+      <h1>登录 AIHubPanel</h1>
+      <p>请输入 NAS 面板密码。</p>
+      <label for="authPassword">密码</label>
+      <input id="authPassword" type="password" autocomplete="current-password" maxlength="256" />
+      <div class="auth-error" id="authError" role="alert" aria-live="polite"></div>
+      <button type="submit" class="btn primary">登录</button>
+    </form>
+  </div>
   <header class="topbar">
     <div class="brand">
       <div class="brand-line">
@@ -206,6 +217,20 @@
       <footer>
         <button class="btn ghost" data-close="setModal">关闭</button>
         <button class="btn primary" id="setSave">保存设置</button>
+      </footer>
+    </div>
+  </div>
+
+  <div class="modal" id="conflictModal" aria-hidden="true" data-backdrop-close="false">
+    <div class="panel" role="dialog" aria-modal="true" aria-labelledby="conflictTitle">
+      <header id="conflictTitle">NAS 配置已更新</header>
+      <div class="content">
+        <p id="conflictMessage">另一台主机刚刚保存了新配置。请选择如何处理当前页面的修改。</p>
+      </div>
+      <footer>
+        <button class="btn ghost" id="conflictExport">导出本机数据</button>
+        <button class="btn" id="conflictReload">使用 NAS 最新配置</button>
+        <button class="btn danger" id="conflictOverwrite">强制覆盖 NAS</button>
       </footer>
     </div>
   </div>
