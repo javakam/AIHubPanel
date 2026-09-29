@@ -93,6 +93,8 @@
 - `compose.yaml` 默认把 NAS 的 4179 端口绑定到所有网卡，适合三台主机通过固定 NAS 地址访问；只走飞牛 HTTPS 反向代理时把 `AI_HUB_BIND` 改为 `127.0.0.1`
 - `AI_HUB_ALLOWED_ORIGIN` 必须填写三台主机共同使用的完整来源，不能把 NAS IP、域名和端口混着用；HTTPS 反向代理下同时把 `AI_HUB_COOKIE_SECURE=1`
 - 共享数据只在 `/data/state.json` 和 `/data/state.json.bak`，写入经过临时文件、`sync`、备份轮换和串行队列；三台主机同时保存时按 revision 返回 409，不静默覆盖
+- 会话契约（2026-09-30 起）：`/api/auth/session` 永远回 200——共享模式带 `{shared:true,authenticated,...}`，未开启时回 `{shared:false,authenticated:false}`；前端以 `shared===false` 判定本地模式。纯静态部署（无 /api 路由）仍靠 404 分支回退，两分支都要保留
+- 更多菜单的「退出登录」仅共享模式显示（startApp 里按 remoteMode 切 hidden），点击后调 `/api/auth/logout` 并整页重载回登录门
 - Dockerfile 设置 `NODE_OPTIONS=--max-old-space-size=256` 作为内存上限；这限制 V8 堆，不等于容器完整 RSS 上限
 - `compose.yaml` 另设 `mem_limit: 512m` 容器级护栏：V8 之外的 RSS 增长由 cgroup 拦截；写盘走临时文件+rename，OOM 强杀不会损坏 `state.json`，`restart: unless-stopped` 自动拉起
 - 2026-09-29 审计后刻意不改三项：不加 gzip（LAN 下 app.js 261KB 传输收益太小，不值复杂度）；不加 SIGTERM 处理（compose `init: true` 负责信号转发与收尸；直连 `docker run` 无 init 时 `docker stop` 最多等 10s 后 SIGKILL，原子写下安全）；不固定 `node:24-alpine` digest（家用 NAS 浮动 major tag 可接受）
@@ -165,6 +167,7 @@
 - 诊断用的临时脚本用完即删，不要留在 `scripts/` 下（会混进 diff 和 `npm test` 的目录约定）；也别写进 `/tmp`（Git Bash 的 `/tmp` 就是 C 盘用户临时目录），放 `E:\goodwork\ZCodeData\zcode-probe\`。
 
 ## 性能 / 内存审计记录
+- **2026-09-30**：P1/P2 修复后在最终代码上串行重跑六套全绿：seeded load 245.6ms、搜索 79.1ms、420 模型详情 171.4ms、网格切换 113.4ms、8 轮重复视图 4488.6ms（预算 4500ms，余量仅 11ms，属机器负载敏感项，独占运行才作准）、renderer 增量 5.6MiB、DOM 7118；启动中位数 1153ms（同日此前一次为 401ms，波动来自机器负载）。
 - **2026-09-29**：共享状态改造入库前全量复测（串行，先清 electron 残留）：seeded load 377.4ms、搜索 117.8ms、420 模型详情 181.8ms、网格切换 111.5ms、8 轮重复视图 4025.1ms、renderer 工作集增量 −9.6MiB、DOM 7113；启动回归源码态中位数 855ms（pageToReady 639ms）；基础、共享状态、布局、存储、启动五套退出码均为 0。
 - **2026-09-19**：修复共享状态备份恢复边界后串行执行 `npm test` 全部通过；性能 seeded load 220.3ms、搜索 75.0ms、420 模型详情 130.2ms、网格切换 99.9ms、8 轮重复视图操作 3038.8ms、renderer 工作集增量 −3.3MiB、DOM 7113。此前一次独占回归受 Windows/Electron 调度影响，`search-clear` 短暂达到 835.4ms，紧接着单独重跑为 190.2ms；性能门禁仍保持原阈值，执行时必须清理残留 Electron 并串行运行
 - **2026-09-13**：死代码清理后复测（清理只删样式与常量，不动逻辑）：布局、基础、打包态启动、性能、存储五套退出码均为 0；性能回归 renderer 工作集增量为 −3MiB，即清理后比清理前更省；打包态启动中位数 5551ms（明细见上节）。
