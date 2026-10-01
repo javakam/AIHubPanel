@@ -1,9 +1,10 @@
 # AIHubPanel 当前状态
 
 ## 正在做什么
-本轮完成上轮建议清单中的 4 项实用改进（b0df279、a8c4af8、d02e34e、8b01117）：repeat 门禁预算对齐实测量级、共享服务网络错误统一中文（fetchSameOrigin 收口 + 门禁）、登录限流支持可信反代按真实 IP 分桶（含反向验证过的双桶测试）、严格 CSP 安全头（唯一内联样式搬入 CSS）。六步审计方案全部执行：最终代码六套回归全绿、浏览器双模式零 CSP 违规、diff 自查与敏感扫描干净。桌面版维持冻结现状；P3×6 与 NAS 真机验收仍留待办。
+本轮清完审计 P3 遗留：①冲突「使用 NAS 最新 / 强制覆盖」统一走新增的 `adoptStationsFromRemote`（与失败回滚同套清扫）；②后台对账 `refreshRemoteRevision` 整体 try/catch 兜底；③首次迁移成功后清除本机 localStorage 旧副本；④限流共享桶已由上轮 TRUSTED_PROXY 解决；⑤README 补充容器重启需重登录；⑥打包态 asar 验证留待「若重建 exe」时执行（桌面版已冻结）。提交 b8867c7，最终代码六套回归全绿，三项浏览器实测通过。待办剩 NAS 真机验收、发版/推送等用户决策项。
 
 ## 最近完成（近三日）
+- **2026-10-01（第二批）**：P3×6 清零（b8867c7）。冲突重载/强制覆盖接入 `adoptStationsFromRemote` 清扫（镜像 restoreStationsFromSnapshot 的保快照+逐站失效模式）；`refreshRemoteRevision` 离线时静默降级（浏览器实测：服务宕机后 focus 触发对账，无 Uncaught (in promise)，仅设计内 warning）；迁移成功清 `LS_STATIONS` 本机副本（实测确认）；README 说明重启重登录；回归新增三条源码门禁。
 - **2026-10-01**：4 项实用改进入库并审计。①`repeat-view-cycles` 预算 4500→5200ms（实测长期 3.0-4.5s，消除贴线假失败）；②新增 `fetchSameOrigin` 收口共享模式全部 fetch，网络错误统一中文（开发中门禁真实抓到 logoutRemote 漏网一处，已修）；③`AI_HUB_TRUSTED_PROXY=1` 时限流按 XFF 最左项分桶（限长+格式校验），compose 透传、README 说明、双桶隔离测试并反向验证；④严格 CSP 写入 BASE_HEADERS（script/style-src 'self'，connect-src 放行 http(s)，img data: 覆盖 favicon），空态内联样式搬入 `.empty` 类，烟测新增 headerIncludes 断言，浏览器双模式零违规。
 - **2026-09-30**：修复审计 P1/P2 全部 6 项并复审入库。P1：登录门启动失败后提交即重试（`remoteStartPending` 守卫 + 中文提示 + 会话有效自动收门）；冲突弹窗 footer 允许换行，375px 实测三按钮不再溢出，且 Esc 不再关闭 `data-backdrop-close="false"` 的弹窗。P2：未开启共享模式时 `/api/auth/session` 返回 200 `{shared:false}`（本地模式控制台不再有 404）；更多菜单新增「退出登录」（仅共享模式显示，走 logout 后整页重载）；桌面版 startServer 清理共享模式继承环境变量。回归同步加固：本地会话契约烟测、`shared:true` 断言、4 条源码结构门禁。复审时浏览器抓到自查引入的 remoteMode 置位顺序 bug 并当场修复。清理：删除已完工的 prompt.md 施工手册（内容在 git 历史）。
 - **2026-09-29**：共享状态改造入库（d617e23）。收尾审计 4 项：`public/app.css` 共享块缩进归位两空格；`.dockerignore` 补 `*.bat`；`compose.yaml` 加 `mem_limit: 512m`（`NODE_OPTIONS` 只限 V8 堆，容器级护栏防泄漏拖垮 NAS，原子写保证 OOM 不损坏 `state.json`）；删除 `docs/superpowers/` 施工手册（内容已全部落地）。刻意不改三项：不加 gzip（LAN 下 260KB 静态资源收益太小）、不加 SIGTERM 处理（compose 有 `init: true`，直连 docker run 超时后 SIGKILL 在原子写下安全）、不固定 node 镜像 digest。六套回归串行全绿：基础+共享、布局、性能（repeat 4025.1ms、renderer 增量 −9.6MiB、DOM 7113）、存储、启动（源码态中位数 855ms）。
@@ -68,7 +69,7 @@
 - [x] 复核共享模式结构性保存：设置代理变化和拖拽排序都会等待 NAS 写入，失败或冲突会回滚并提示。
 - [x] 【2026-09-30 审计·待拍板】P1×2：①登录门启动失败死锁（startApp catch 后 remoteAuthSubmit 为 null，表单提交无响应，错误显示英文原文 "Failed to fetch"，仅能手动刷新，浏览器实测复现）→ 已修复（899a4b8），死门三阶段浏览器实测通过；②冲突弹窗窄屏溢出（.btn white-space:nowrap + .panel footer 无 flex-wrap，375px 实测「导出本机数据」按钮左溢屏幕外 61px）→ 已修复（899a4b8），375px 换行实测通过。
 - [x] 【2026-09-30 审计·待拍板】P2×4：①共享模式无登出入口（REMOTE_LOGOUT_PATH 死常量，服务端 /api/auth/logout 已实现但前端无按钮）→ 已修复（899a4b8）；②本地模式每次加载控制台必现 GET /api/auth/session 404 → 已修复（899a4b8，会话契约改 200 {shared:false}）；③冲突弹窗 data-backdrop-close="false" 但 Esc 仍可关 → 已修复（899a4b8，Esc 统一按该属性判断）；④electron/main.js startServer 只清 AI_HUB_ALLOWED_ORIGIN → 已修复（1549e37，清五个共享变量）。
-- [ ] 【2026-09-30 审计·待拍板】P3×6：①reloadRemoteConflict/overwriteRemoteConflict 直接重建 stations 未逐站 invalidateStation（在途结果静默丢弃、请求 Map 残留）；②refreshRemoteRevision 无 try/catch，NAS 不可达时每次切标签页产生 unhandled rejection；③首次迁移成功后不清 localStorage 旧站点，NAS 清空后会提示复活已删站点；④登录限流按 socket.remoteAddress，反代后所有用户共享 5 次/5 分钟一个桶；⑤容器重启会话丢失需重登录，README 未说明；⑥打包态 server/*.mjs 的 asarUnpack 链路未实测（模式与 public/** 一致，下次 npm run dist 时验证）。
+- [x] 【2026-09-30 审计·待拍板】P3×6：①reloadRemoteConflict/overwriteRemoteConflict 直接重建 stations 未逐站 invalidateStation → 已修复（b8867c7，adoptStationsFromRemote）；②refreshRemoteRevision 无 try/catch → 已修复（b8867c7，离线实测无未处理拒绝）；③首次迁移成功后不清 localStorage 旧站点 → 已修复（b8867c7，实测清除）；④登录限流按 socket.remoteAddress，反代后共享桶 → 已修复（d02e34e，AI_HUB_TRUSTED_PROXY）；⑤容器重启会话丢失需重登录，README 未说明 → 已补（b8867c7）；⑥打包态 server/*.mjs 未实测 → 桌面版冻结后仅重建 exe 时需要验证，留档不改。
 
 ## 已知问题（长期）
 - portable 单文件 exe 启动会包含自解压耗时；1.2.0 打包态实测总耗时中位数 5326ms（清理后重新打包的同版本产物为 5551ms；同法 1.1.1 为 5635ms、1.1.0 约 8.0 秒，差异主要来自机器负载），应用自身页面到首帧约 0.33-0.37 秒
