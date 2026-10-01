@@ -3387,7 +3387,7 @@ function emptyInline(title, sub){
 function emptyDetail(filteredOut=false){
   const title=filteredOut ? "请选择匹配的中转站" : "选择左侧中转站";
   const sub=filteredOut ? "当前已选站点不在筛选结果中，请从左侧选择匹配项。" : "点击任一站点查看详情与测试";
-  return `<div class="empty" style="height:100%"><h3>${title}</h3><p>${sub}</p></div>`;
+  return `<div class="empty"><h3>${title}</h3><p>${sub}</p></div>`;
 }
 
 // 列表左栏：标题操作、连续四格指标、URL 与固定高度 Key 轨道；展开只改变轨道内显示，不推动卡片布局。

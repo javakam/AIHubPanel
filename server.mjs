@@ -78,7 +78,12 @@ const BASE_HEADERS = {
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",
   "Referrer-Policy": "no-referrer",
-  "Cross-Origin-Opener-Policy": "same-origin"
+  "Cross-Origin-Opener-Policy": "same-origin",
+  // 页面无内联脚本/样式（空态高度已移入 .empty 类），script-src 保持严格；
+  // connect-src 需放行 http(s)：站点 Base URL 允许 http 直连；img 需 data:（favicon）。
+  "Content-Security-Policy":
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
+    "connect-src 'self' http: https:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
 };
 
 function sendText(res, method, status, message, extraHeaders = {}) {

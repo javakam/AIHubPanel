@@ -333,7 +333,7 @@
 
   /* ---------- 空状态 ---------- */
   .empty{
-    text-align:center; padding:48px 20px; color:var(--dim);
+    height:100%; text-align:center; padding:48px 20px; color:var(--dim);
     border:1px dashed var(--bd2); border-radius:var(--radius); background:rgba(255,255,255,.018);
   }
   .grid-view .empty{grid-column:1 / -1}

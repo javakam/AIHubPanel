@@ -121,6 +121,13 @@ async function expectFetch(label, url, options, expectation) {
       throw new Error(`${label}: expected header ${name}=${value}`);
     }
   }
+  if (expectation.headerIncludes) {
+    const [name, fragment] = expectation.headerIncludes;
+    const actual = response.headers.get(name) || "";
+    if (!actual.includes(fragment)) {
+      throw new Error(`${label}: expected header ${name} to include "${fragment}", got "${actual}"`);
+    }
+  }
 
   const body = options && options.method === "HEAD" ? "" : await readBody(response);
   if (expectation.includes && !body.includes(expectation.includes)) {
@@ -200,7 +207,7 @@ async function runServerSmoke() {
   const child = startPanelServer(port);
   try {
     await waitForServer(baseUrl, child);
-    await expectFetch("static index", `${baseUrl}/`, {}, { status: 200, includes: "AIHubPanel" });
+    await expectFetch("static index", `${baseUrl}/`, {}, { status: 200, includes: "AIHubPanel", headerIncludes: ["content-security-policy", "script-src 'self'"] });
     await expectFetch("proxy health", `${baseUrl}/api/proxy/health`, { method: "HEAD" }, { status: 200, header: ["x-aihub-proxy", "1"] });
     await expectFetch("local session contract", `${baseUrl}/api/auth/session`, {}, { status: 200, includes: '"shared":false' });
     await expectFetch("static method guard", `${baseUrl}/`, { method: "POST" }, { status: 405 });
