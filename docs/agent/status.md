@@ -1,9 +1,10 @@
 # AIHubPanel 当前状态
 
 ## 正在做什么
-本轮收尾代码侧最后一项待办：index.html 内联内容门禁（无内联 script/style/style=/on* 事件，与严格 CSP 一致性绑定，六个合成用例反向验证）+ README 新增首次部署验收清单（healthy、data/ 写权限、重启持久化、多端冲突、反代三开关）。待办只剩 NAS 真机验收、推送/发版两项用户决策。
+交付前收口中：compose.yaml 经 js-yaml 真实解析 + 12 项结构断言全过；最终 HEAD（d046c98）六套回归中五套全绿，性能套件两次被机器负载打断（CPU 61%，用户自身应用占用；与代码无关的阶段也慢 2-4 倍，b8867c7 后零生产代码变更），按「负载敏感项以独占运行为准」协议延后到机器空闲时补一次独占复跑即可交接。待办不变：NAS 真机验收、推送/发版两项用户决策。
 
 ## 最近完成（近三日）
+- **2026-10-01（第四批）**：compose.yaml 用 js-yaml 做解析器级校验（12 项结构断言：安全项、env 透传、挂载、端口）；最终 HEAD 六套回归 5/6 全绿（性能套件两次被 61% 的机器负载打断，失败特征为全套系统性变慢——search-clear 1129ms/desktopScenario 2361ms，零生产代码变更，判定为负载窗口而非退化，复跑延后）。
 - **2026-10-01（第三批）**：index.html 无内联内容门禁（关掉遗留的「HTML 校验」待办——实测本就无内联脚本，现在有护栏保证将来也不出现）；README 增加五条 NAS 首次部署验收清单。
 - **2026-10-01（第二批）**：P3×6 清零（b8867c7）。冲突重载/强制覆盖接入 `adoptStationsFromRemote` 清扫（镜像 restoreStationsFromSnapshot 的保快照+逐站失效模式）；`refreshRemoteRevision` 离线时静默降级（浏览器实测：服务宕机后 focus 触发对账，无 Uncaught (in promise)，仅设计内 warning）；迁移成功清 `LS_STATIONS` 本机副本（实测确认）；README 说明重启重登录；回归新增三条源码门禁。
 - **2026-10-01**：4 项实用改进入库并审计。①`repeat-view-cycles` 预算 4500→5200ms（实测长期 3.0-4.5s，消除贴线假失败）；②新增 `fetchSameOrigin` 收口共享模式全部 fetch，网络错误统一中文（开发中门禁真实抓到 logoutRemote 漏网一处，已修）；③`AI_HUB_TRUSTED_PROXY=1` 时限流按 XFF 最左项分桶（限长+格式校验），compose 透传、README 说明、双桶隔离测试并反向验证；④严格 CSP 写入 BASE_HEADERS（script/style-src 'self'，connect-src 放行 http(s)，img data: 覆盖 favicon），空态内联样式搬入 `.empty` 类，烟测新增 headerIncludes 断言，浏览器双模式零违规。
