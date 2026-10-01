@@ -1,9 +1,10 @@
 # AIHubPanel 当前状态
 
 ## 正在做什么
-2026-10-01 交付收口完成并已推送：审计（29 笔提交全范围敏感扫描 + 清单核对）→ 空闲窗口六套回归全绿（性能独占复跑 3383.3ms，证实此前两次失败为 61% 负载窗口）→ 29 笔提交推送至 origin/master（266be40..2c75039）。本地与远端已同步，工作区干净。待办仅剩：飞牛 NAS 真机验收（README 清单）、可选打 v1.3.0 tag。
+2026-10-01 v1.3.0 已发版：部署名统一 `gateway-aihubpanel`（服务/镜像/容器名），健康检查改 busybox wget（消除每 30s 拉起 Node 进程的内存抖动），版本四处同步升 1.3.0（package.json/package-lock×2/README 产物名/regression 断言）。master 与 v1.3.0 tag 均已推送，本地远端同步。待办仅剩：NAS 真机验收（README 清单，验收时留意 wget 健康检查首次真实运行）。
 
 ## 最近完成（近三日）
+- **2026-10-01（发版批）**：部署审计与 v1.3.0 发版。Dockerfile/compose 审查定案三项：部署名 gateway-aihubpanel、健康检查 node -e → wget（约 40MB×每 30s 的瞬时进程开销归零）、其余内存配置（V8 堆 256MB、mem_limit 512m）经评估维持——上限非预留，实际空载几十 MB，降配反而有 OOM 风险。版本 1.3.0 发版：91ab4e5（部署）、b76de40（版本）、v1.3.0 附注 tag 含完整发布说明，均已推送。
 - **2026-10-01（第四批）**：compose.yaml 用 js-yaml 做解析器级校验（12 项结构断言：安全项、env 透传、挂载、端口）；最终 HEAD 六套回归 5/6 全绿（性能套件两次被 61% 的机器负载打断，失败特征为全套系统性变慢——search-clear 1129ms/desktopScenario 2361ms，零生产代码变更，判定为负载窗口而非退化，复跑延后）。
 - **2026-10-01（第三批）**：index.html 无内联内容门禁（关掉遗留的「HTML 校验」待办——实测本就无内联脚本，现在有护栏保证将来也不出现）；README 增加五条 NAS 首次部署验收清单。
 - **2026-10-01（第二批）**：P3×6 清零（b8867c7）。冲突重载/强制覆盖接入 `adoptStationsFromRemote` 清扫（镜像 restoreStationsFromSnapshot 的保快照+逐站失效模式）；`refreshRemoteRevision` 离线时静默降级（浏览器实测：服务宕机后 focus 触发对账，无 Uncaught (in promise)，仅设计内 warning）；迁移成功清 `LS_STATIONS` 本机副本（实测确认）；README 说明重启重登录；回归新增三条源码门禁。

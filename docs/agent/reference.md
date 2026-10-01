@@ -90,7 +90,10 @@
 - `PORTABLE_EXECUTABLE_DIR` / `PORTABLE_EXECUTABLE_FILE` 由便携启动器提供，用来确定用户实际 exe 的同级配置目录
 
 ## 飞牛 NAS / Docker
+- 部署名统一 `gateway-aihubpanel`（compose 服务/镜像/容器名，2026-10-01 起）；compose 结构可用仓库内 js-yaml 做解析器级断言（node -e 脚本，2026-10-01 曾验证 12 项）
 - Docker 运行时只复制 `server.mjs`、`server/` 和 `public/`，不复制 Electron、`node_modules`、桌面配置、`data/` 或文档；容器使用 Node 非 root 用户、只读根文件系统、临时 `/tmp`、丢弃 Linux capabilities 和 `no-new-privileges`
+- 健康检查用 busybox `wget -qO /dev/null`（alpine 自带）：曾用 `node -e fetch` 方案，每 30s 拉起一个约 40MB 的 Node 进程；改 wget 后该开销归零。首次 NAS 部署时需实际确认 wget 探测正常（healthy 状态）
+- 内存配置维持：V8 堆上限 256MB（NODE_OPTIONS）+ 容器 mem_limit 512m。上限不是预留，实际空载几十 MB；不要再往下调 256MB——20MiB 状态的 JSON 克隆瞬时堆就可能触顶 OOM
 - `compose.yaml` 默认把 NAS 的 4179 端口绑定到所有网卡，适合三台主机通过固定 NAS 地址访问；只走飞牛 HTTPS 反向代理时把 `AI_HUB_BIND` 改为 `127.0.0.1`
 - `AI_HUB_ALLOWED_ORIGIN` 必须填写三台主机共同使用的完整来源，不能把 NAS IP、域名和端口混着用；HTTPS 反向代理下同时把 `AI_HUB_COOKIE_SECURE=1`
 - 共享数据只在 `/data/state.json` 和 `/data/state.json.bak`，写入经过临时文件、`sync`、备份轮换和串行队列；三台主机同时保存时按 revision 返回 409，不静默覆盖
