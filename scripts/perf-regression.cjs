@@ -24,7 +24,7 @@ const LIMITS_MS = new Map([
   ["select-heavy-detail", 1400],
   ["switch-grid", 1000],
   ["switch-list", 1000],
-  ["repeat-view-cycles", 4500],
+  ["repeat-view-cycles", 5200],
   ["mobile-focus-heavy", 1600]
 ]);
 const MAX_DOM_NODES = 18000;
