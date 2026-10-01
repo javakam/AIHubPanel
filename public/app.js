@@ -541,6 +541,8 @@ async function bootstrapRemoteState(){
           const result=await persistRemoteStations("首次迁移",localStations);
           remoteInitialStations=normalizeStations(result.stations);
           remoteRevision=result.revision;
+          // 迁移成功即清掉本机旧副本：NAS 以后被清空时，不应再提示导入这些已上载的站点。
+          try{ window.localStorage.removeItem(LS_STATIONS); }catch(_){ }
         }
       }catch(_){ /* 损坏的本机缓存不阻断 NAS 启动 */ }
     }
@@ -622,16 +624,22 @@ function scheduleRemoteStationsSave(reason="保存"){
 }
 async function refreshRemoteRevision(){
   if(!remoteMode || remoteSavePending) return;
-  const response=await remoteFetch(REMOTE_META_PATH);
-  if(response.status===401){ await loginRemote(); return; }
-  if(!response.ok) return;
-  const meta=await remoteJson(response);
-  if(Number(meta.revision)===remoteRevision) return;
-  const stateResponse=await remoteFetch(REMOTE_STATE_PATH);
-  if(!stateResponse.ok) return;
-  const state=await remoteJson(stateResponse);
-  if(!Array.isArray(state.stations)) return;
-  openRemoteConflict(state);
+  // 后台对账是尽力而为：NAS 短暂不可达时记一条警告并跳过，下次页面可见再试，
+  // 不让 visibilitychange/focus 监听产生未处理的 promise 拒绝。
+  try{
+    const response=await remoteFetch(REMOTE_META_PATH);
+    if(response.status===401){ await loginRemote(); return; }
+    if(!response.ok) return;
+    const meta=await remoteJson(response);
+    if(Number(meta.revision)===remoteRevision) return;
+    const stateResponse=await remoteFetch(REMOTE_STATE_PATH);
+    if(!stateResponse.ok) return;
+    const state=await remoteJson(stateResponse);
+    if(!Array.isArray(state.stations)) return;
+    openRemoteConflict(state);
+  }catch(error){
+    console.warn("共享配置对账失败", error);
+  }
 }
 function openRemoteConflict(state){
   if(!state || !Array.isArray(state.stations)) return;
@@ -643,7 +651,7 @@ function openRemoteConflict(state){
 function reloadRemoteConflict(){
   const state=remoteConflictState;
   if(!state || !Array.isArray(state.stations)) return;
-  stations=normalizeStations(state.stations);
+  adoptStationsFromRemote(normalizeStations(state.stations));
   remoteRevision=Number(state.revision)||0;
   remoteConflictState=null;
   remoteConflictLocalStations=null;
@@ -660,7 +668,7 @@ function reloadRemoteConflict(){
 async function overwriteRemoteConflict(){
   if(!remoteConflictState) return;
   const localStations=remoteConflictLocalStations ? normalizeStations(remoteConflictLocalStations) : normalizeStations(stations);
-  stations=localStations;
+  adoptStationsFromRemote(localStations);
   remoteRevision=Number(remoteConflictState.revision)||0;
   const persisted=await persistStationsNow("强制覆盖", localStations);
   if(!persisted){
@@ -1306,6 +1314,20 @@ function restoreStationsFromSnapshot(snapshot){
   const displays=new Map();
   stations.forEach(st=>{ const display=modelDisplaySnapshots.get(st.id); if(display) displays.set(st.id, display); });
   stations=JSON.parse(snapshot);
+  stations.forEach(st=>{
+    if(!st || typeof st.id !== "string") return;
+    invalidateStation(st.id);
+    const display=displays.get(st.id);
+    if(display) modelDisplaySnapshots.set(st.id, display);
+  });
+}
+// 冲突「使用 NAS 最新 / 强制覆盖」与失败回滚一样都是整体重建站点对象：
+// 旧对象上的在途请求按 ID 残留在运行时 Map，必须走同一套清扫（逐站失效 + 保留显示快照），
+// 否则旧响应可能写入新配置，或卡片顺序因快照丢失而跳动。
+function adoptStationsFromRemote(nextStations){
+  const displays=new Map();
+  stations.forEach(st=>{ const display=modelDisplaySnapshots.get(st.id); if(display) displays.set(st.id, display); });
+  stations=nextStations;
   stations.forEach(st=>{
     if(!st || typeof st.id !== "string") return;
     invalidateStation(st.id);

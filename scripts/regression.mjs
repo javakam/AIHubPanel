@@ -188,6 +188,13 @@ function runReleaseAndDefaultChecks() {
       /await fetch\(REMOTE_/.test(appSource)) {
     throw new Error("shared-service fetches must go through fetchSameOrigin for unified network errors");
   }
+  if (!/function adoptStationsFromRemote\(/.test(appSource) ||
+      (appSource.match(/adoptStationsFromRemote\(/g) || []).length < 3) {
+    throw new Error("conflict reload/overwrite must sweep stale request state via adoptStationsFromRemote");
+  }
+  if (!/共享配置对账失败/.test(appSource) || !/removeItem\(LS_STATIONS\)/.test(appSource)) {
+    throw new Error("background reconciliation must swallow errors; migration must clear the local stations copy");
+  }
   if (!/openModal\.dataset\.backdropClose==="false"\) e\.preventDefault\(\)/.test(appSource)) {
     throw new Error("mandatory modals (form/conflict) must not be dismissed via Escape");
   }
