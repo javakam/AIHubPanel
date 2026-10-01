@@ -1,9 +1,10 @@
 # AIHubPanel 当前状态
 
 ## 正在做什么
-本轮清完审计 P3 遗留：①冲突「使用 NAS 最新 / 强制覆盖」统一走新增的 `adoptStationsFromRemote`（与失败回滚同套清扫）；②后台对账 `refreshRemoteRevision` 整体 try/catch 兜底；③首次迁移成功后清除本机 localStorage 旧副本；④限流共享桶已由上轮 TRUSTED_PROXY 解决；⑤README 补充容器重启需重登录；⑥打包态 asar 验证留待「若重建 exe」时执行（桌面版已冻结）。提交 b8867c7，最终代码六套回归全绿，三项浏览器实测通过。待办剩 NAS 真机验收、发版/推送等用户决策项。
+本轮收尾代码侧最后一项待办：index.html 内联内容门禁（无内联 script/style/style=/on* 事件，与严格 CSP 一致性绑定，六个合成用例反向验证）+ README 新增首次部署验收清单（healthy、data/ 写权限、重启持久化、多端冲突、反代三开关）。待办只剩 NAS 真机验收、推送/发版两项用户决策。
 
 ## 最近完成（近三日）
+- **2026-10-01（第三批）**：index.html 无内联内容门禁（关掉遗留的「HTML 校验」待办——实测本就无内联脚本，现在有护栏保证将来也不出现）；README 增加五条 NAS 首次部署验收清单。
 - **2026-10-01（第二批）**：P3×6 清零（b8867c7）。冲突重载/强制覆盖接入 `adoptStationsFromRemote` 清扫（镜像 restoreStationsFromSnapshot 的保快照+逐站失效模式）；`refreshRemoteRevision` 离线时静默降级（浏览器实测：服务宕机后 focus 触发对账，无 Uncaught (in promise)，仅设计内 warning）；迁移成功清 `LS_STATIONS` 本机副本（实测确认）；README 说明重启重登录；回归新增三条源码门禁。
 - **2026-10-01**：4 项实用改进入库并审计。①`repeat-view-cycles` 预算 4500→5200ms（实测长期 3.0-4.5s，消除贴线假失败）；②新增 `fetchSameOrigin` 收口共享模式全部 fetch，网络错误统一中文（开发中门禁真实抓到 logoutRemote 漏网一处，已修）；③`AI_HUB_TRUSTED_PROXY=1` 时限流按 XFF 最左项分桶（限长+格式校验），compose 透传、README 说明、双桶隔离测试并反向验证；④严格 CSP 写入 BASE_HEADERS（script/style-src 'self'，connect-src 放行 http(s)，img data: 覆盖 favicon），空态内联样式搬入 `.empty` 类，烟测新增 headerIncludes 断言，浏览器双模式零违规。
 - **2026-09-30**：修复审计 P1/P2 全部 6 项并复审入库。P1：登录门启动失败后提交即重试（`remoteStartPending` 守卫 + 中文提示 + 会话有效自动收门）；冲突弹窗 footer 允许换行，375px 实测三按钮不再溢出，且 Esc 不再关闭 `data-backdrop-close="false"` 的弹窗。P2：未开启共享模式时 `/api/auth/session` 返回 200 `{shared:false}`（本地模式控制台不再有 404）；更多菜单新增「退出登录」（仅共享模式显示，走 logout 后整页重载）；桌面版 startServer 清理共享模式继承环境变量。回归同步加固：本地会话契约烟测、`shared:true` 断言、4 条源码结构门禁。复审时浏览器抓到自查引入的 remoteMode 置位顺序 bug 并当场修复。清理：删除已完工的 prompt.md 施工手册（内容在 git 历史）。
@@ -59,7 +60,7 @@
 - [x] 复核性能回归 `repeat-view-cycles` 的 4500ms 预算（scripts/perf-regression.cjs:27）。本轮实测 4293.6ms，余量不足 5%；并发跑其它 Electron 套件时曾出现 4595.5ms 的超限。要么把预算调到与实测量级相符，要么让该套件独占运行。→ 2026-10-01 已调至 5200ms（b0df279），实测区间 3.0-4.5s，余量充足。
 - [ ] 决定 1.2.0 是否发版：打 `v1.2.0` tag 并推远端。本次请求只要求打包，未打 tag、未推。
 - [ ] 三条本轮刻意未改、留给用户拍板的项：`configureRuntimePaths()` 目录创建失败返回 `null` 时不降级也不弹窗（electron/main.js:70）；`TEMP`/`TMP`/`TMPDIR` 的赋值顺序；`buildUrl` 里用 `_` 前缀区分请求参数的约定。都已逐条核实，改动收益小于风险，故记录不改。
-- [ ] 基础回归的语法检查只覆盖仓库内的 JS/MJS/CJS，不含 `public/index.html` 的内联部分；如需覆盖要另加 HTML 校验。
+- [x] 基础回归的语法检查只覆盖仓库内的 JS/MJS/CJS，不含 `public/index.html` 的内联部分；如需覆盖要另加 HTML 校验。→ 2026-10-01 以更有价值的形式关闭：新增「index.html 无内联脚本/样式/事件」门禁（与严格 CSP 绑定），本就无内联内容，现在保证将来也不出现。
 - [ ] 决定 exe 是否继续瘦身：删 7 个 Electron 运行时文件可省 9%（101221724→92051519 字节），代价是失去无 GPU 软件渲染回退与系统 ffmpeg。本轮实测能启动但未在真实机器验证，默认不采纳。
 - [ ] 根目录 `config.json`（非打包态 `npm start` 写入，已 gitignore）里存有 2 个明文 `sk-` Key，本轮未改动；`apikey.json` 拆分只覆盖桌面版 exe 的存储路径，是否要把 `npm start` 也切到分离存储需用户决定。
 - [x] 完成飞牛 NAS Docker 共享状态改造：单容器、无运行时 npm 依赖、`/data` 持久化、登录、CSRF、限流、原子写入、备份恢复和版本冲突。

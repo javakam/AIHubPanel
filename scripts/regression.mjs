@@ -195,6 +195,12 @@ function runReleaseAndDefaultChecks() {
   if (!/共享配置对账失败/.test(appSource) || !/removeItem\(LS_STATIONS\)/.test(appSource)) {
     throw new Error("background reconciliation must swallow errors; migration must clear the local stations copy");
   }
+  const indexSource = fs.readFileSync(path.join(ROOT, "public/index.html"), "utf8");
+  if (/<script(?![^>]*\bsrc=)[^>]*>/.test(indexSource) || /<style[\s>]/.test(indexSource) ||
+      /\sstyle="/.test(indexSource) ||
+      /\son(click|change|input|load|error|submit|key(down|up|press))="/.test(indexSource)) {
+    throw new Error("index.html must stay free of inline scripts/styles/handlers (strict CSP would block them)");
+  }
   if (!/openModal\.dataset\.backdropClose==="false"\) e\.preventDefault\(\)/.test(appSource)) {
     throw new Error("mandatory modals (form/conflict) must not be dismissed via Escape");
   }
