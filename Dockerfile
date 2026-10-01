@@ -15,7 +15,7 @@ ENV NODE_OPTIONS=--max-old-space-size=256
 EXPOSE 4179
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:4179/api/proxy/health',{method:'HEAD'}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD wget -qO /dev/null http://127.0.0.1:4179/api/proxy/health || exit 1
 
 USER node
 ENTRYPOINT ["node", "server.mjs"]

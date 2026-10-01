@@ -55,7 +55,7 @@ AI_HUB_TRUSTED_PROXY=0
 
 直接通过 NAS 地址访问时，把 `AI_HUB_ALLOWED_ORIGIN` 写成浏览器地址栏中的完整来源，例如 `http://192.168.1.20:4179`；通过 HTTPS 反向代理访问时写成 `https://aihub.example.com`，并把 `AI_HUB_COOKIE_SECURE` 改为 `1`。三台主机必须使用同一个固定来源，不要一台用 IP、另一台用不同域名。
 
-在飞牛 Docker 管理器中构建并启动后，检查容器健康状态和 `http://NAS地址:4179/`。升级时执行 `docker compose up -d --build`，不要删除 `data/`；这个目录里的 `state.json` 和 `state.json.bak` 是共享配置及恢复备份。建议在升级前复制一份 `data/` 到 NAS 的备份目录。
+在飞牛 Docker 管理器中构建并启动后，容器名为 `gateway-aihubpanel`，检查其健康状态和 `http://NAS地址:4179/`。升级时执行 `docker compose up -d --build`，不要删除 `data/`；这个目录里的 `state.json` 和 `state.json.bak` 是共享配置及恢复备份。建议在升级前复制一份 `data/` 到 NAS 的备份目录。
 
 ### 首次部署验收清单
 
@@ -63,7 +63,8 @@ AI_HUB_TRUSTED_PROXY=0
 2. **数据目录写权限**：若容器反复重启或日志报 `EACCES`，检查宿主机 `data/` 目录是否允许容器内 `node` 用户（UID 1000）写入；
 3. **登录与持久化**：浏览器登录、添加一个站点，然后 `docker compose restart`，确认站点和测试结果还在；
 4. **多端冲突**：两台主机同时打开面板各改一处，后保存的一方应收到版本冲突提示，可选导出 / 使用 NAS 最新 / 强制覆盖；
-5. **反向代理（如使用）**：HTTPS 域名能正常登录，`.env` 里 `AI_HUB_ALLOWED_ORIGIN` 已改为 `https://` 来源且 `AI_HUB_COOKIE_SECURE=1`。
+5. **反向代理（如使用）**：HTTPS 域名能正常登录，`.env` 里 `AI_HUB_ALLOWED_ORIGIN` 已改为 `https://` 来源且 `AI_HUB_COOKIE_SECURE=1`；
+6. **资源占用**：在飞牛 Docker 面板查看 `gateway-aihubpanel` 内存，空载通常几十 MB（Node 进程基线 + 面板状态），远低于 512m 容器上限；若持续逼近上限再排查。健康检查每 30 秒用轻量 `wget` 探测，不额外拉起 Node 进程。
 
 容器只需要持久化 `data/`。升级镜像前备份这个目录；容器重建不会影响里面的共享配置。三台主机同时修改时，面板按版本号拒绝旧数据覆盖，并提示重新加载或导出本机数据。登录会话保存在容器内存里，容器重启或升级后需要重新登录一次，`data/` 里的共享配置不受影响。
 
@@ -123,6 +124,6 @@ npm run dist
 
 产物在 `electron/release/`：
 
-- `AIHubPanel-1.2.0.exe`：单文件非安装版，直接双击运行。
+- `AIHubPanel-1.3.0.exe`：单文件非安装版，直接双击运行。
 
 打包脚本会先清空旧产物，构建完成后只保留这一个 exe。程序数据保存在运行时 exe 同级目录：普通配置和测试记录在 `config.json`，API Key 单独在 `apikey.json`。Electron 的缓存、日志和临时运行数据也尽量写入同级隐藏目录 `.aihubpanel-data`。便携版启动时虽然会在系统临时目录自解压，但业务数据仍写回用户实际双击的 exe 所在目录。两个 JSON 文件都请妥善保存，其中 `apikey.json` 尤其重要。

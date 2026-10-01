@@ -1,10 +1,10 @@
 services:
-  aihubpanel:
+  gateway-aihubpanel:
     build:
       context: .
       dockerfile: Dockerfile
-    image: aihubpanel:local
-    container_name: aihubpanel
+    image: gateway-aihubpanel:local
+    container_name: gateway-aihubpanel
     restart: unless-stopped
     init: true
     mem_limit: 512m
