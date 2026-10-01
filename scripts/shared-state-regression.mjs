@@ -21,7 +21,7 @@ function getFreePort() {
   });
 }
 
-function startServer(port, dataDir) {
+function startServer(port, dataDir, extraEnv = {}) {
   const child = spawn(NODE_BIN, ["server.mjs"], {
     cwd: ROOT,
     env: {
@@ -31,7 +31,8 @@ function startServer(port, dataDir) {
       AI_HUB_SHARED_STATE: "1",
       AI_HUB_DATA_DIR: dataDir,
       AI_HUB_ADMIN_PASSWORD: PASSWORD,
-      AI_HUB_SESSION_SECRET: SESSION_SECRET
+      AI_HUB_SESSION_SECRET: SESSION_SECRET,
+      ...extraEnv
     },
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"]
@@ -288,6 +289,40 @@ async function run() {
       headers: { cookie: structuralCookie }
     });
     await expectStatus("state after logout", afterLogout, 401);
+
+    // 可信反代模式：登录限流按 X-Forwarded-For 最左项分桶，不同客户端互不挤占。
+    await stopServer(child);
+    child = null;
+    const proxiedPort = await getFreePort();
+    child = startServer(proxiedPort, dataDir, { AI_HUB_TRUSTED_PROXY: "1" });
+    const proxiedUrl = `http://127.0.0.1:${proxiedPort}`;
+    await waitForServer(proxiedUrl, child);
+    const proxiedLogin = await fetch(`${proxiedUrl}/api/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ password: PASSWORD })
+    });
+    await expectStatus("trusted proxy login", proxiedLogin, 200);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const bucketA = await fetch(`${proxiedUrl}/api/auth/login`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-forwarded-for": "203.0.113.10" },
+        body: JSON.stringify({ password: `wrong-${attempt}` })
+      });
+      await expectStatus(`trusted proxy bucket A failure ${attempt + 1}`, bucketA, 401);
+    }
+    const limitedA = await fetch(`${proxiedUrl}/api/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-forwarded-for": "203.0.113.10" },
+      body: JSON.stringify({ password: "wrong-final" })
+    });
+    await expectStatus("trusted proxy bucket A rate limited", limitedA, 429);
+    const bucketB = await fetch(`${proxiedUrl}/api/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-forwarded-for": "203.0.113.11" },
+      body: JSON.stringify({ password: "wrong-other-bucket" })
+    });
+    await expectStatus("trusted proxy bucket B isolated", bucketB, 401);
 
     console.log("shared state regression: expected routes are present and behavior passed");
   } finally {

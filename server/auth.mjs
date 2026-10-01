@@ -40,7 +40,14 @@ function cookieHeader(value, maxAge, secure) {
   return parts.join("; ");
 }
 
-function clientKey(req) {
+function clientKey(req, trustedProxy) {
+  // 仅在部署方显式声明存在可信反代时才读 X-Forwarded-For 最左项；
+  // XFF 客户端可伪造，直连部署一律用 socket 地址，避免限流被头字段洗桶。
+  if (trustedProxy) {
+    const raw = typeof req.headers["x-forwarded-for"] === "string" ? req.headers["x-forwarded-for"] : "";
+    const first = raw.split(",")[0].trim().slice(0, 64);
+    if (first && /^[0-9a-fA-F:.]+$/.test(first)) return first;
+  }
   return req.socket?.remoteAddress || "unknown";
 }
 
@@ -57,6 +64,7 @@ export function createAuth(options = {}) {
   let password = String(options.password || "");
   const sessionSecret = String(options.sessionSecret || "");
   const secureCookie = options.secureCookie === true;
+  const trustedProxy = options.trustedProxy === true;
   const authSalt = crypto.createHash("sha256").update(PASSWORD_SALT).update(sessionSecret).digest();
   const passwordDigestPromise = derivePassword(password, authSalt).finally(() => {
     password = "";
@@ -79,14 +87,14 @@ export function createAuth(options = {}) {
 
   function failureAllowed(req) {
     prune();
-    const key = clientKey(req);
+    const key = clientKey(req, trustedProxy);
     const current = failures.get(key);
     if (!current || current.resetAt <= Date.now()) return true;
     return current.count < MAX_FAILURES;
   }
 
   function recordFailure(req) {
-    const key = clientKey(req);
+    const key = clientKey(req, trustedProxy);
     const current = failures.get(key);
     const now = Date.now();
     if (!current || current.resetAt <= now) {
@@ -97,7 +105,7 @@ export function createAuth(options = {}) {
   }
 
   function clearFailures(req) {
-    failures.delete(clientKey(req));
+    failures.delete(clientKey(req, trustedProxy));
   }
 
   function authenticateRequest(req) {

@@ -48,7 +48,10 @@ AI_HUB_ALLOWED_ORIGIN=http://aihub-nas.example:4179
 AI_HUB_ADMIN_PASSWORD=请替换成面板密码
 AI_HUB_SESSION_SECRET=请替换成至少16个字符的随机字符串
 AI_HUB_COOKIE_SECURE=0
+AI_HUB_TRUSTED_PROXY=0
 ```
+
+通过 HTTPS 反向代理访问时，可以把 `AI_HUB_TRUSTED_PROXY` 设为 `1`：登录失败限流会按 `X-Forwarded-For` 里的真实客户端 IP 分桶，避免几台主机共用同一个失败配额。直连访问时保持 `0`（该头字段可伪造，只有确认前面有自己的反代时才开启）。
 
 直接通过 NAS 地址访问时，把 `AI_HUB_ALLOWED_ORIGIN` 写成浏览器地址栏中的完整来源，例如 `http://192.168.1.20:4179`；通过 HTTPS 反向代理访问时写成 `https://aihub.example.com`，并把 `AI_HUB_COOKIE_SECURE` 改为 `1`。三台主机必须使用同一个固定来源，不要一台用 IP、另一台用不同域名。
 

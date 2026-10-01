@@ -44,10 +44,12 @@ const RAW_ALLOWED_PROXY_ORIGIN = String(process.env.AI_HUB_ALLOWED_ORIGIN || "")
 const ALLOWED_PROXY_ORIGIN = normaliseConfiguredOrigin(RAW_ALLOWED_PROXY_ORIGIN);
 const IS_LOOPBACK_BIND = isLoopbackBindHost(HOST);
 const stateStore = SHARED_STATE_ENABLED ? createStateStore({ dataDir: SHARED_STATE_DATA_DIR }) : null;
+const TRUSTED_PROXY = /^(1|true|yes)$/i.test(String(process.env.AI_HUB_TRUSTED_PROXY || ""));
 const auth = SHARED_STATE_ENABLED ? createAuth({
   password: process.env.AI_HUB_ADMIN_PASSWORD,
   sessionSecret: process.env.AI_HUB_SESSION_SECRET,
-  secureCookie: /^(1|true|yes)$/i.test(String(process.env.AI_HUB_COOKIE_SECURE || ""))
+  secureCookie: /^(1|true|yes)$/i.test(String(process.env.AI_HUB_COOKIE_SECURE || "")),
+  trustedProxy: TRUSTED_PROXY
 }) : null;
 if (RAW_ALLOWED_PROXY_ORIGIN && !ALLOWED_PROXY_ORIGIN) {
   throw new Error("AI_HUB_ALLOWED_ORIGIN 必须是有效的 http(s) origin，例如 http://192.168.1.20:4179");

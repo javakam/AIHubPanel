@@ -19,6 +19,7 @@ services:
       AI_HUB_ADMIN_PASSWORD: "${AI_HUB_ADMIN_PASSWORD:?set the panel password}"
       AI_HUB_SESSION_SECRET: "${AI_HUB_SESSION_SECRET:?set a random session secret}"
       AI_HUB_COOKIE_SECURE: "${AI_HUB_COOKIE_SECURE:-0}"
+      AI_HUB_TRUSTED_PROXY: "${AI_HUB_TRUSTED_PROXY:-0}"
     volumes:
       - ./data:/data
     read_only: true
