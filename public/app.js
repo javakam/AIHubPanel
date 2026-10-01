@@ -463,12 +463,22 @@ function remoteJson(response){
     try{return text ? JSON.parse(text) : {};}catch(_){return {};}
   });
 }
+// 共享服务的所有 fetch 都走这里：网络层失败（断网、服务重启）统一译成中文，
+// HTTP 状态码语义原样保留，交给调用方按状态分支处理。
+async function fetchSameOrigin(path, options={}){
+  try{
+    return await fetch(path, { ...options, credentials:"same-origin", cache:"no-store" });
+  }catch(error){
+    console.warn("共享服务请求失败", error);
+    throw new Error("无法连接共享服务（网络不通或服务正在重启）");
+  }
+}
 async function remoteFetch(path, options={}){
   const headers={ ...(options.headers || {}) };
   if(remoteCsrfToken && options.method && options.method !== "GET" && options.method !== "HEAD"){
     headers["X-AIHub-CSRF"]=remoteCsrfToken;
   }
-  return fetch(path, { ...options, headers, credentials:"same-origin", cache:"no-store" });
+  return fetchSameOrigin(path, { ...options, headers });
 }
 function updateRemoteSavePending(){
   remoteSavePending=!!remoteSaveTimer || remoteSaveActive>0;
@@ -478,11 +488,9 @@ async function loginRemote(){
   while(true){
     const password=await new Promise(resolve=>{ remoteAuthSubmit=resolve; });
     remoteAuthSubmit=null;
-    const response=await fetch(REMOTE_LOGIN_PATH,{
+    const response=await fetchSameOrigin(REMOTE_LOGIN_PATH,{
       method:"POST",
       headers:{"content-type":"application/json"},
-      credentials:"same-origin",
-      cache:"no-store",
       body:JSON.stringify({ password })
     });
     const body=await remoteJson(response);
@@ -497,12 +505,12 @@ async function loginRemote(){
 }
 async function logoutRemote(){
   // 无论服务端登出是否成功都整页重载回登录门：登出后本地内存里的共享数据不应继续展示。
-  try{ await fetch(REMOTE_LOGOUT_PATH,{ method:"POST", credentials:"same-origin", cache:"no-store" }); }
+  try{ await fetchSameOrigin(REMOTE_LOGOUT_PATH,{ method:"POST" }); }
   catch(_){ /* 服务不可达时同样放弃本地状态；重载后登录门会给出可重试的错误提示 */ }
   window.location.reload();
 }
 async function bootstrapRemoteState(){
-  const sessionResponse=await fetch(REMOTE_SESSION_PATH,{credentials:"same-origin",cache:"no-store"});
+  const sessionResponse=await fetchSameOrigin(REMOTE_SESSION_PATH);
   if(sessionResponse.status===404) return false;
   if(!sessionResponse.ok) throw new Error(`共享服务响应异常（HTTP ${sessionResponse.status}）`);
   const session=await remoteJson(sessionResponse);

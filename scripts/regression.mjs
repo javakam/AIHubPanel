@@ -176,6 +176,11 @@ function runReleaseAndDefaultChecks() {
       !/if\(remoteAuthSubmit\) remoteAuthSubmit\(password\);\s*else void startApp\(\);/.test(appSource)) {
     throw new Error("auth gate must retry startApp when bootstrap fails");
   }
+  if (!/async function fetchSameOrigin\(/.test(appSource) ||
+      !/无法连接共享服务（网络不通或服务正在重启）/.test(appSource) ||
+      /await fetch\(REMOTE_/.test(appSource)) {
+    throw new Error("shared-service fetches must go through fetchSameOrigin for unified network errors");
+  }
   if (!/openModal\.dataset\.backdropClose==="false"\) e\.preventDefault\(\)/.test(appSource)) {
     throw new Error("mandatory modals (form/conflict) must not be dismissed via Escape");
   }
