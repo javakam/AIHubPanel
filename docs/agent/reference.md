@@ -85,6 +85,7 @@
 - `AI_HUB_ADMIN_PASSWORD` 共享模式登录密码
 - `AI_HUB_SESSION_SECRET` 共享模式会话密钥，至少 16 个字符
 - `AI_HUB_COOKIE_SECURE` HTTPS 访问时设为 `1`，直接 HTTP 内网访问时设为 `0`
+- `AI_HUB_TRUSTED_PROXY` 设为 `1` 时登录限流按 `X-Forwarded-For` 最左项分桶（限长 64 + 格式校验，非法回退 socket 地址）；仅在确认前面有自己的反代时开启，直连保持 `0` 防头字段伪造
 - `AIHUB_BOOT_TRACE` 启动耗时诊断日志文件路径（设了就开探针）
 - `PORTABLE_EXECUTABLE_DIR` / `PORTABLE_EXECUTABLE_FILE` 由便携启动器提供，用来确定用户实际 exe 的同级配置目录
 
@@ -134,6 +135,8 @@
 - 默认发布为单文件 portable exe；启动时会有自解压开销，配置文件仍位于用户实际 exe 同级目录
 
 ## 关键内部约束（来自历史审计）
+- 服务端 `BASE_HEADERS` 带严格 CSP（script-src/style-src 'self'、connect-src 'self' http: https:）：给页面加内联脚本、内联 style 属性、eval 或新外部源都会被浏览器拦截；`app.js` 模板里的 `style="..."` 一律走 CSS 类（先例：空态 height:100% 移入 `.empty`，2026-10-01）
+- 共享模式前端对 `/api/auth|/api/state` 的请求必须走 `fetchSameOrigin`（网络层失败统一译成中文，HTTP 状态语义不变）；源码门禁禁止 `await fetch(REMOTE_*` 绕过。写新的远端调用时沿用
 - `modelDisplayTier`（public/app.js:2788）是判断口径的单一来源，「复制可用模型」和排序都靠它
 - 测试中卡片保留上次快照排序键，插入比较必须用同一份 `keys`（public/app.js:2823），不能用实时 latency
 - `modelListEmpty` 仅在 HTTP 200 + 空数组时为真，任何错误/非空都清
@@ -160,7 +163,7 @@
 - 跑任何 Electron 套件前先杀掉残留进程（`taskkill //F //IM electron.exe`）：旧实例占着单实例锁会拖慢启动，多个套件并发会让耗时门禁出现假失败。
 - 布局回归：重载前必须先注册 `did-finish-load` 并带超时（scripts/layout-regression.cjs:22），否则监听器注册在 `reload()` 之后且无超时会永久挂住；窗口尺寸用 `resizeTo` 轮询 `innerWidth` 达标（:41）；整轮有 `WATCHDOG_MS` 兜底（:37）。
 - 布局回归的余额断言比的是「四格指标区的格子是否都在容器内」（scripts/layout-regression.cjs:223，断言在 :298 和 :304），不是「值盒子是否越过格子边界」。后者永远为假：`.m-val` 是 `display:block` + `overflow:hidden`，宽度恒等于父级内容盒（public/app.css:821），这种断言抓不到任何回归，写门禁时要先确认断言真的可能失败。
-- 性能回归：耗时达标之外还要断言结果内容（scripts/perf-regression.cjs:397 的 `assertTimings`），只看耗时会把「渲染很快但结果错了」放行——「快了」完全可能是少渲染了内容；内存测不到时直接判失败而不是跳过（:423）。`repeat-view-cycles` 预算 4500ms（:27）实测余量不足 5%，改动该路径时要留意。
+- 性能回归：耗时达标之外还要断言结果内容（scripts/perf-regression.cjs:397 的 `assertTimings`），只看耗时会把「渲染很快但结果错了」放行——「快了」完全可能是少渲染了内容；内存测不到时直接判失败而不是跳过（:423）。`repeat-view-cycles` 预算 2026-10-01 起为 5200ms（:27），实测长期在 3.0–4.5s 区间，预算已对齐量级；该门禁仍对机器负载敏感，结论以独占运行为准。
 - 性能回归的内存单位只能按 KB→MiB 固定换算（scripts/perf-regression.cjs:326 的 `asMiB`）。曾在读数大于 1 MiB 时改按字节理解、除以 `1024*1024`，结果把一个 1.2GiB 的渲染进程读成 1.2MiB，120MiB 的泄漏门禁变成永不可能失败。
 - 视图切换类断言必须同时断「数量」（scripts/perf-regression.cjs:411-414）。只断「上一屏的 DOM 没了」的话，整屏都没渲染也照样满足那一条，而那一刻当然是最快的。
 - 三个 Electron 套件都能用环境变量兜底超时，别把机器负载当成功能失败：性能 `AIHUB_PERF_WATCHDOG_MS`（scripts/perf-regression.cjs:33，默认 180000）、存储 `AIHUB_STORAGE_WATCHDOG_MS`（scripts/storage-regression.cjs:9，默认 120000）、基础回归 `AIHUB_RUN_TIMEOUT_MS`（scripts/regression.mjs:22，默认 120000）。

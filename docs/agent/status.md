@@ -1,9 +1,10 @@
 # AIHubPanel 当前状态
 
 ## 正在做什么
-本轮完成审计发现的 P1/P2 全部 6 项修复（提交 899a4b8、1549e37），并按六步审计方案复审：最终代码上六套回归串行全绿、六项修复浏览器逐条实测通过、diff 逐行自查与 id 双向核对通过、冗余文件清理完成（prompt.md 已删，1e22eaf）。浏览器复验时抓到并当场修掉一个本轮自查引入的 bug（remoteMode 在本地模式被提前置真），说明修复后的浏览器实测不可省。P3×6 仍留待办待拍板；NAS 真机 Docker 验收仍是唯一外部缺口。
+本轮完成上轮建议清单中的 4 项实用改进（b0df279、a8c4af8、d02e34e、8b01117）：repeat 门禁预算对齐实测量级、共享服务网络错误统一中文（fetchSameOrigin 收口 + 门禁）、登录限流支持可信反代按真实 IP 分桶（含反向验证过的双桶测试）、严格 CSP 安全头（唯一内联样式搬入 CSS）。六步审计方案全部执行：最终代码六套回归全绿、浏览器双模式零 CSP 违规、diff 自查与敏感扫描干净。桌面版维持冻结现状；P3×6 与 NAS 真机验收仍留待办。
 
 ## 最近完成（近三日）
+- **2026-10-01**：4 项实用改进入库并审计。①`repeat-view-cycles` 预算 4500→5200ms（实测长期 3.0-4.5s，消除贴线假失败）；②新增 `fetchSameOrigin` 收口共享模式全部 fetch，网络错误统一中文（开发中门禁真实抓到 logoutRemote 漏网一处，已修）；③`AI_HUB_TRUSTED_PROXY=1` 时限流按 XFF 最左项分桶（限长+格式校验），compose 透传、README 说明、双桶隔离测试并反向验证；④严格 CSP 写入 BASE_HEADERS（script/style-src 'self'，connect-src 放行 http(s)，img data: 覆盖 favicon），空态内联样式搬入 `.empty` 类，烟测新增 headerIncludes 断言，浏览器双模式零违规。
 - **2026-09-30**：修复审计 P1/P2 全部 6 项并复审入库。P1：登录门启动失败后提交即重试（`remoteStartPending` 守卫 + 中文提示 + 会话有效自动收门）；冲突弹窗 footer 允许换行，375px 实测三按钮不再溢出，且 Esc 不再关闭 `data-backdrop-close="false"` 的弹窗。P2：未开启共享模式时 `/api/auth/session` 返回 200 `{shared:false}`（本地模式控制台不再有 404）；更多菜单新增「退出登录」（仅共享模式显示，走 logout 后整页重载）；桌面版 startServer 清理共享模式继承环境变量。回归同步加固：本地会话契约烟测、`shared:true` 断言、4 条源码结构门禁。复审时浏览器抓到自查引入的 remoteMode 置位顺序 bug 并当场修复。清理：删除已完工的 prompt.md 施工手册（内容在 git 历史）。
 - **2026-09-29**：共享状态改造入库（d617e23）。收尾审计 4 项：`public/app.css` 共享块缩进归位两空格；`.dockerignore` 补 `*.bat`；`compose.yaml` 加 `mem_limit: 512m`（`NODE_OPTIONS` 只限 V8 堆，容器级护栏防泄漏拖垮 NAS，原子写保证 OOM 不损坏 `state.json`）；删除 `docs/superpowers/` 施工手册（内容已全部落地）。刻意不改三项：不加 gzip（LAN 下 260KB 静态资源收益太小）、不加 SIGTERM 处理（compose 有 `init: true`，直连 docker run 超时后 SIGKILL 在原子写下安全）、不固定 node 镜像 digest。六套回归串行全绿：基础+共享、布局、性能（repeat 4025.1ms、renderer 增量 −9.6MiB、DOM 7113）、存储、启动（源码态中位数 855ms）。
 - **2026-09-18**：完成飞牛 NAS Docker 共享状态改造。新增 `server/auth.mjs`、`server/state-store.mjs`、`scripts/shared-state-regression.mjs`、`Dockerfile`、`compose.yaml` 和 `.dockerignore`；服务端增加 HttpOnly 会话、CSRF、失败限流、原子状态写入、`.bak` 恢复和版本冲突；前端在共享模式下把站点、API Key、模型列表和测试结果放到 NAS，浏览器只保留界面状态。
@@ -54,7 +55,7 @@
 - [x] 完成性能与内存审计：新增性能基准、清理非当前视图 DOM、合并搜索输入渲染、清理失效请求状态。
 - [x] 按 1.1.0 重新发布：清理旧发布提交和 `v1.0.1` tag，生成单文件 portable exe，创建并推送 `v1.1.0` tag。
 - [x] 复核并单独提交在途的 `apikey.json` 拆分改动（`electron/main.js`、`electron/preload.js`、`README.md`、`prompt.md`、`scripts/storage-regression.cjs`、`scripts/startup-regression.cjs` 的其余部分、`docs/agent/*`）。该改动当前通过全套回归，但不由本轮审计代为提交。→ 已复核并随 1.1.1 发布进包。
-- [ ] 复核性能回归 `repeat-view-cycles` 的 4500ms 预算（scripts/perf-regression.cjs:27）。本轮实测 4293.6ms，余量不足 5%；并发跑其它 Electron 套件时曾出现 4595.5ms 的超限。要么把预算调到与实测量级相符，要么让该套件独占运行。
+- [x] 复核性能回归 `repeat-view-cycles` 的 4500ms 预算（scripts/perf-regression.cjs:27）。本轮实测 4293.6ms，余量不足 5%；并发跑其它 Electron 套件时曾出现 4595.5ms 的超限。要么把预算调到与实测量级相符，要么让该套件独占运行。→ 2026-10-01 已调至 5200ms（b0df279），实测区间 3.0-4.5s，余量充足。
 - [ ] 决定 1.2.0 是否发版：打 `v1.2.0` tag 并推远端。本次请求只要求打包，未打 tag、未推。
 - [ ] 三条本轮刻意未改、留给用户拍板的项：`configureRuntimePaths()` 目录创建失败返回 `null` 时不降级也不弹窗（electron/main.js:70）；`TEMP`/`TMP`/`TMPDIR` 的赋值顺序；`buildUrl` 里用 `_` 前缀区分请求参数的约定。都已逐条核实，改动收益小于风险，故记录不改。
 - [ ] 基础回归的语法检查只覆盖仓库内的 JS/MJS/CJS，不含 `public/index.html` 的内联部分；如需覆盖要另加 HTML 校验。
